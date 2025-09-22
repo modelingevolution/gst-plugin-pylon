@@ -32,3 +32,4 @@ subprojects/packagecache
 subprojects/pybind11-*
 
 debian
+venv/

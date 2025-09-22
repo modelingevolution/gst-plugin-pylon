@@ -69,6 +69,15 @@ struct _GstPylonSrc {
   gchar *pfs_location;
   gboolean enable_correction;
   GstPylonCaptureErrorEnum capture_error;
+  gchar *hdr_sequence;
+  gchar *hdr_sequence2;
+  gint hdr_profile;
+  guint frame_count;
+  gboolean profile_switch_pending;
+  gint target_profile;
+  guint profile0_window_size;
+  guint profile1_window_size;
+  gint switch_retry_count;
   GObject *cam;
   GObject *stream;
 
@@ -110,6 +119,9 @@ enum {
   PROP_PFS_LOCATION,
   PROP_ENABLE_CORRECTION,
   PROP_CAPTURE_ERROR,
+  PROP_HDR_SEQUENCE,
+  PROP_HDR_SEQUENCE2,
+  PROP_HDR_PROFILE,
   PROP_CAM,
   PROP_STREAM,
 #ifdef NVMM_ENABLED
@@ -126,6 +138,9 @@ enum {
 #define PROP_USER_SET_DEFAULT NULL
 #define PROP_PFS_LOCATION_DEFAULT NULL
 #define PROP_ENABLE_CORRECTION_DEFAULT TRUE
+#define PROP_HDR_SEQUENCE_DEFAULT NULL
+#define PROP_HDR_SEQUENCE2_DEFAULT NULL
+#define PROP_HDR_PROFILE_DEFAULT 0
 #define PROP_CAM_DEFAULT NULL
 #define PROP_STREAM_DEFAULT NULL
 #define PROP_CAPTURE_ERROR_DEFAULT ENUM_ABORT
@@ -311,6 +326,43 @@ static void gst_pylon_src_class_init(GstPylonSrcClass *klass) {
           GST_TYPE_CAPTURE_ERROR_ENUM, PROP_CAPTURE_ERROR_DEFAULT,
           static_cast<GParamFlags>(G_PARAM_READWRITE |
                                    GST_PARAM_CONTROLLABLE)));
+
+  g_object_class_install_property(
+      gobject_class, PROP_HDR_SEQUENCE,
+      g_param_spec_string(
+          "hdr-sequence", "HDR Exposure Sequence (Profile 0)",
+          "Comma-separated list of exposure times in microseconds for HDR sequence mode Profile 0 "
+          "(e.g., '19,150'). Setting this property will automatically configure "
+          "the camera's sequencer mode with the specified exposure values. "
+          "Each exposure value will be assigned to a sequencer set, cycling through "
+          "them continuously. Leave empty to disable sequencer mode.",
+          PROP_HDR_SEQUENCE_DEFAULT,
+          static_cast<GParamFlags>(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+                                   GST_PARAM_MUTABLE_READY)));
+
+  g_object_class_install_property(
+      gobject_class, PROP_HDR_SEQUENCE2,
+      g_param_spec_string(
+          "hdr-sequence2", "HDR Exposure Sequence (Profile 1)",
+          "Comma-separated list of exposure times in microseconds for HDR sequence mode Profile 1 "
+          "(e.g., '5000,10000'). When both hdr-sequence and hdr-sequence2 are set, "
+          "dual profile mode is enabled allowing runtime switching between profiles. "
+          "Leave empty to use single profile mode.",
+          PROP_HDR_SEQUENCE2_DEFAULT,
+          static_cast<GParamFlags>(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+                                   GST_PARAM_MUTABLE_READY)));
+
+  g_object_class_install_property(
+      gobject_class, PROP_HDR_PROFILE,
+      g_param_spec_int(
+          "hdr-profile", "Active HDR Profile",
+          "Select active HDR profile (0 or 1). Only applicable when both hdr-sequence "
+          "and hdr-sequence2 are configured. Profile switches occur after 2 frames "
+          "to maintain frame window consistency.",
+          0, 1, PROP_HDR_PROFILE_DEFAULT,
+          static_cast<GParamFlags>(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+                                   GST_PARAM_CONTROLLABLE)));
+
 #ifdef NVMM_ENABLED
   g_object_class_install_property(
       gobject_class, PROP_NVSURFACE_LAYOUT,
@@ -401,6 +453,13 @@ static void gst_pylon_src_init(GstPylonSrc *self) {
   self->pfs_location = PROP_PFS_LOCATION_DEFAULT;
   self->enable_correction = PROP_ENABLE_CORRECTION_DEFAULT;
   self->capture_error = PROP_CAPTURE_ERROR_DEFAULT;
+  self->hdr_sequence = PROP_HDR_SEQUENCE_DEFAULT;
+  self->hdr_sequence2 = PROP_HDR_SEQUENCE2_DEFAULT;
+  self->hdr_profile = PROP_HDR_PROFILE_DEFAULT;
+  self->frame_count = 0;
+  self->profile_switch_pending = FALSE;
+  self->target_profile = 0;
+  self->switch_retry_count = 0;
   self->cam = PROP_CAM_DEFAULT;
   self->stream = PROP_STREAM_DEFAULT;
   gst_video_info_init(&self->video_info);
@@ -447,6 +506,25 @@ static void gst_pylon_src_set_property(GObject *object, guint property_id,
     case PROP_CAPTURE_ERROR:
       self->capture_error =
           static_cast<GstPylonCaptureErrorEnum>(g_value_get_enum(value));
+      break;
+    case PROP_HDR_SEQUENCE:
+      g_free(self->hdr_sequence);
+      self->hdr_sequence = g_value_dup_string(value);
+      break;
+    case PROP_HDR_SEQUENCE2:
+      g_free(self->hdr_sequence2);
+      self->hdr_sequence2 = g_value_dup_string(value);
+      break;
+    case PROP_HDR_PROFILE:
+      {
+        gint new_profile = g_value_get_int(value);
+        if (new_profile != self->hdr_profile) {
+          self->target_profile = new_profile;
+          self->profile_switch_pending = TRUE;
+          GST_INFO_OBJECT(self, "Profile switch requested: %d -> %d",
+                          self->hdr_profile, new_profile);
+        }
+      }
       break;
 #ifdef NVMM_ENABLED
     case PROP_NVSURFACE_LAYOUT:
@@ -495,6 +573,15 @@ static void gst_pylon_src_get_property(GObject *object, guint property_id,
     case PROP_CAPTURE_ERROR:
       g_value_set_enum(value, self->capture_error);
       break;
+    case PROP_HDR_SEQUENCE:
+      g_value_set_string(value, self->hdr_sequence);
+      break;
+    case PROP_HDR_SEQUENCE2:
+      g_value_set_string(value, self->hdr_sequence2);
+      break;
+    case PROP_HDR_PROFILE:
+      g_value_set_int(value, self->hdr_profile);
+      break;
 #ifdef NVMM_ENABLED
     case PROP_NVSURFACE_LAYOUT:
       g_value_set_enum(value, self->nvsurface_layout);
@@ -530,6 +617,12 @@ static void gst_pylon_src_finalize(GObject *object) {
 
   g_free(self->user_set);
   self->user_set = NULL;
+
+  g_free(self->hdr_sequence);
+  self->hdr_sequence = NULL;
+
+  g_free(self->hdr_sequence2);
+  self->hdr_sequence2 = NULL;
 
   if (self->cam) {
     g_object_unref(self->cam);
@@ -701,6 +794,45 @@ static gboolean gst_pylon_src_set_caps(GstBaseSrc *src, GstCaps *caps) {
   if (FALSE == ret && error) {
     action = "configure";
     goto log_error;
+  }
+
+  /* Configure HDR sequence if specified */
+  if (self->hdr_sequence && strlen(self->hdr_sequence) > 0) {
+    gboolean dual_mode = (self->hdr_sequence2 && strlen(self->hdr_sequence2) > 0);
+
+    if (dual_mode) {
+      // Parse sequences to get window sizes
+      gchar **exposures1 = g_strsplit(self->hdr_sequence, ",", -1);
+      gchar **exposures2 = g_strsplit(self->hdr_sequence2, ",", -1);
+      self->profile0_window_size = g_strv_length(exposures1);
+      self->profile1_window_size = g_strv_length(exposures2);
+      g_strfreev(exposures1);
+      g_strfreev(exposures2);
+
+      GST_INFO_OBJECT(self, "Configuring dual HDR profiles:");
+      GST_INFO_OBJECT(self, "  Profile 0: %s (%d exposures)", self->hdr_sequence, self->profile0_window_size);
+      GST_INFO_OBJECT(self, "  Profile 1: %s (%d exposures)", self->hdr_sequence2, self->profile1_window_size);
+      ret = gst_pylon_configure_dual_hdr_sequence(self->pylon,
+                                                   self->hdr_sequence,
+                                                   self->hdr_sequence2,
+                                                   &error);
+    } else {
+      GST_INFO_OBJECT(self, "Configuring single HDR sequence: %s", self->hdr_sequence);
+      ret = gst_pylon_configure_hdr_sequence(self->pylon, self->hdr_sequence, &error);
+      self->profile0_window_size = 0;
+      self->profile1_window_size = 0;
+    }
+
+    if (FALSE == ret && error) {
+      GST_ERROR_OBJECT(self, "Failed to configure HDR sequence: %s", error->message);
+      action = "configure HDR sequence";
+      goto log_error;
+    } else if (ret == TRUE) {
+      GST_INFO_OBJECT(self, "HDR sequence configured successfully");
+      self->frame_count = 0;
+      self->profile_switch_pending = FALSE;
+      self->switch_retry_count = 0;
+    }
   }
 
   ret = gst_pylon_start(self->pylon, &error);
@@ -985,10 +1117,76 @@ static GstFlowReturn gst_pylon_src_create(GstPushSrc *src, GstBuffer **buf) {
   gboolean pylon_ret = TRUE;
   GstFlowReturn ret = GST_FLOW_OK;
   gint capture_error = -1;
+  gboolean switch_pending = FALSE;
+  gint target_profile = 0;
 
   GST_OBJECT_LOCK(self);
   capture_error = self->capture_error;
+
+  // Check if HDR profile switch is pending
+  if (self->profile_switch_pending && self->hdr_sequence2) {
+    // Increment frame counter
+    self->frame_count++;
+
+    // Determine the window size for the current profile
+    guint current_window_size = (self->hdr_profile == 0) ?
+                                self->profile0_window_size :
+                                self->profile1_window_size;
+
+    // Switch after completing the current window
+    if (self->frame_count >= current_window_size) {
+      switch_pending = TRUE;
+      target_profile = self->target_profile;
+      self->profile_switch_pending = FALSE;
+      self->frame_count = 0;
+      GST_DEBUG_OBJECT(self, "Profile switch ready after %d frames", current_window_size);
+    } else {
+      GST_DEBUG_OBJECT(self, "Profile switch pending, frame %d/%d",
+                       self->frame_count, current_window_size);
+    }
+  }
   GST_OBJECT_UNLOCK(self);
+
+  // Perform the actual profile switch if needed (before capture)
+  if (switch_pending) {
+    GST_INFO_OBJECT(self, "Initiating switch to HDR profile %d", target_profile);
+    GError *switch_error = NULL;
+    if (!gst_pylon_switch_hdr_profile(self->pylon, target_profile, &switch_error)) {
+      GST_WARNING_OBJECT(self, "Failed to switch HDR profile: %s",
+                         switch_error ? switch_error->message : "Unknown error");
+      if (switch_error) g_error_free(switch_error);
+    } else {
+      GST_OBJECT_LOCK(self);
+      self->hdr_profile = target_profile;
+      // Start retry counter for software signal pulsing
+      self->switch_retry_count = 5;
+      GST_OBJECT_UNLOCK(self);
+      GST_DEBUG_OBJECT(self, "Software signal sent, will retry for %d frames", 5);
+    }
+  }
+
+  // Continue pulsing software signal if retry count is active
+  // WORKAROUND: The camera's sequencer checks for software signals during specific
+  // windows. If our pulse arrives outside this window, the switch won't happen.
+  // We retry the pulse for up to 5 frames to ensure the camera catches it.
+  GST_OBJECT_LOCK(self);
+  if (self->switch_retry_count > 0) {
+    gint retry_profile = self->hdr_profile;
+    self->switch_retry_count--;
+    GST_DEBUG_OBJECT(self, "Retrying software signal pulse, %d attempts remaining",
+                     self->switch_retry_count);
+    GST_OBJECT_UNLOCK(self);
+
+    // Send another pulse
+    GError *retry_error = NULL;
+    if (!gst_pylon_switch_hdr_profile(self->pylon, retry_profile, &retry_error)) {
+      GST_DEBUG_OBJECT(self, "Retry pulse failed: %s",
+                       retry_error ? retry_error->message : "Unknown error");
+      if (retry_error) g_error_free(retry_error);
+    }
+  } else {
+    GST_OBJECT_UNLOCK(self);
+  }
 
   pylon_ret = gst_pylon_capture(
       self->pylon, buf, static_cast<GstPylonCaptureErrorEnum>(capture_error),

@@ -74,6 +74,13 @@ gboolean gst_pylon_set_configuration(GstPylon *self, const GstCaps *conf,
                                      GError **err);
 gboolean gst_pylon_set_pfs_config(GstPylon *self, const gchar *pfs_location,
                                   GError **err);
+gboolean gst_pylon_configure_hdr_sequence(GstPylon *self, const gchar *hdr_sequence,
+                                          GError **err);
+gboolean gst_pylon_configure_dual_hdr_sequence(GstPylon *self,
+                                               const gchar *hdr_sequence1,
+                                               const gchar *hdr_sequence2,
+                                               GError **err);
+gboolean gst_pylon_switch_hdr_profile(GstPylon *self, gint profile, GError **err);
 gchar *gst_pylon_camera_get_string_properties();
 gchar *gst_pylon_stream_grabber_get_string_properties();
 

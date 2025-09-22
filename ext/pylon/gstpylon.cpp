@@ -405,6 +405,723 @@ gboolean gst_pylon_set_pfs_config(GstPylon *self, const gchar *pfs_location,
   return TRUE;
 }
 
+gboolean gst_pylon_configure_hdr_sequence(GstPylon *self, const gchar *hdr_sequence,
+                                          GError **err) {
+  g_return_val_if_fail(self, FALSE);
+  g_return_val_if_fail(err && *err == NULL, FALSE);
+
+  if (!hdr_sequence || strlen(hdr_sequence) == 0) {
+    GST_DEBUG("No HDR sequence specified, skipping sequencer configuration");
+    return TRUE;
+  }
+
+  GST_INFO("Configuring HDR sequence with exposures: %s", hdr_sequence);
+
+  try {
+    GenApi::INodeMap &nodemap = self->camera->GetNodeMap();
+
+    // Parse exposure values from comma-separated string
+    gchar **exposures = g_strsplit(hdr_sequence, ",", -1);
+    guint num_exposures = g_strv_length(exposures);
+
+    if (num_exposures < 2) {
+      g_strfreev(exposures);
+      g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
+                  "HDR sequence requires at least 2 exposure values, got %d", num_exposures);
+      return FALSE;
+    }
+
+    GST_DEBUG("Configuring sequencer for %d exposure values", num_exposures);
+
+    // Check if sequencer features are available
+    Pylon::CEnumParameter sequencerMode(nodemap, "SequencerMode");
+    if (!sequencerMode.IsValid()) {
+      g_strfreev(exposures);
+      g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
+                  "Camera does not support sequencer mode");
+      return FALSE;
+    }
+
+    // Get current camera settings BEFORE entering configuration mode
+    Pylon::CIntegerParameter currentWidth(nodemap, "Width");
+    Pylon::CIntegerParameter currentHeight(nodemap, "Height");
+    Pylon::CEnumParameter currentPixelFormat(nodemap, "PixelFormat");
+
+    gint64 width_val = currentWidth.GetValue();
+    gint64 height_val = currentHeight.GetValue();
+    Pylon::String_t pixelformat_val = currentPixelFormat.GetValue();
+
+    GST_INFO("Current camera settings before sequencer config: Width=%ld, Height=%ld, PixelFormat=%s",
+              width_val, height_val, pixelformat_val.c_str());
+
+    // First make sure sequencer mode is OFF before configuring
+    if (sequencerMode.IsWritable()) {
+      Pylon::String_t current_mode = sequencerMode.GetValue();
+      GST_INFO("Current SequencerMode: %s", current_mode.c_str());
+      if (current_mode == "On") {
+        GST_INFO("Disabling sequencer mode before configuration");
+        sequencerMode.SetValue("Off");
+        GST_INFO("SequencerMode set to: Off");
+      }
+    }
+
+    // Enter sequencer configuration mode
+    Pylon::CEnumParameter seqConfigMode(nodemap, "SequencerConfigurationMode");
+    if (seqConfigMode.IsValid() && seqConfigMode.IsWritable()) {
+      Pylon::String_t current_config = seqConfigMode.GetValue();
+      GST_INFO("Current SequencerConfigurationMode: %s", current_config.c_str());
+      GST_INFO("Entering sequencer configuration mode");
+      seqConfigMode.SetValue("On");
+      GST_INFO("SequencerConfigurationMode set to: On");
+    }
+
+    // Set sequencer trigger source - try different valid options
+    Pylon::CEnumParameter seqTriggerSource(nodemap, "SequencerTriggerSource");
+    if (seqTriggerSource.IsValid() && seqTriggerSource.IsWritable()) {
+      // Get available values for logging
+      GenApi::StringList_t entries;
+      seqTriggerSource.GetSettableValues(entries);
+
+      GST_DEBUG("Available SequencerTriggerSource values:");
+      for (const auto& entry : entries) {
+        GST_DEBUG("  - %s", entry.c_str());
+      }
+
+      // Try to find a suitable trigger source
+      bool trigger_set = false;
+
+      // Try common trigger sources in order of preference
+      // ExposureActive confirmed to work on a2A1920-51gcPRO
+      const char* trigger_options[] = {"ExposureActive", "ExposureStart", "AcquisitionActive", "FrameStart", "AcquisitionStart", NULL};
+      for (int i = 0; trigger_options[i] != NULL; i++) {
+        if (seqTriggerSource.CanSetValue(trigger_options[i])) {
+          GST_INFO("Setting sequencer trigger source to %s", trigger_options[i]);
+          seqTriggerSource.SetValue(trigger_options[i]);
+          trigger_set = true;
+          break;
+        }
+      }
+
+      // If none of the preferred options work, just use the first available
+      if (!trigger_set && entries.size() > 0) {
+        GST_WARNING("Using first available trigger source: %s", entries[0].c_str());
+        seqTriggerSource.SetValue(entries[0]);
+      }
+    } else {
+      GST_WARNING("SequencerTriggerSource not available or not writable - continuing without setting it");
+    }
+
+    // Configure sequencer start set
+    Pylon::CIntegerParameter seqSetStart(nodemap, "SequencerSetStart");
+    if (seqSetStart.IsValid() && seqSetStart.IsWritable()) {
+      gint64 current_start = seqSetStart.GetValue();
+      GST_INFO("Current SequencerSetStart: %ld", current_start);
+      GST_INFO("Setting sequencer start set to 0");
+      seqSetStart.SetValue(0);
+      GST_INFO("SequencerSetStart set to: 0");
+    }
+
+    // Configure each sequencer set
+    Pylon::CIntegerParameter setSelector(nodemap, "SequencerSetSelector");
+    Pylon::CIntegerParameter setNext(nodemap, "SequencerSetNext");
+    Pylon::CIntegerParameter seqWidth(nodemap, "Width");
+    Pylon::CIntegerParameter seqHeight(nodemap, "Height");
+    Pylon::CEnumParameter seqPixelFormat(nodemap, "PixelFormat");
+
+    // Try to get Gain parameter (might be Gain or GainRaw)
+    Pylon::CFloatParameter seqGain;
+    Pylon::CIntegerParameter seqGainRaw;
+    gdouble gain_val = -1;
+    bool has_gain = false;
+
+    if (nodemap.GetNode("Gain")) {
+      seqGain.Attach(nodemap.GetNode("Gain"));
+      if (seqGain.IsValid() && seqGain.IsReadable()) {
+        gain_val = seqGain.GetValue();
+        has_gain = true;
+        GST_INFO("Current Gain: %.2f", gain_val);
+      }
+    } else if (nodemap.GetNode("GainRaw")) {
+      seqGainRaw.Attach(nodemap.GetNode("GainRaw"));
+      if (seqGainRaw.IsValid() && seqGainRaw.IsReadable()) {
+        gain_val = seqGainRaw.GetValue();
+        has_gain = true;
+        GST_INFO("Current GainRaw: %.0f", gain_val);
+      }
+    }
+
+    // Try to find the exposure time parameter (might have different names)
+    Pylon::CFloatParameter exposureTime;
+    if (nodemap.GetNode("ExposureTime")) {
+      exposureTime.Attach(nodemap.GetNode("ExposureTime"));
+    } else if (nodemap.GetNode("ExposureTimeAbs")) {
+      exposureTime.Attach(nodemap.GetNode("ExposureTimeAbs"));
+      GST_DEBUG("Using ExposureTimeAbs instead of ExposureTime");
+    }
+
+    if (!exposureTime.IsValid()) {
+      g_strfreev(exposures);
+      g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
+                  "Camera does not have ExposureTime parameter");
+      return FALSE;
+    }
+
+    for (guint i = 0; i < num_exposures; i++) {
+      gdouble exposure = g_strtod(exposures[i], NULL);
+      guint next_set = (i + 1) % num_exposures;  // Loop back to first set
+
+      GST_DEBUG("Configuring set %d: exposure=%.2f μs, next=%d", i, exposure, next_set);
+
+      // Select the set
+      if (setSelector.IsValid() && setSelector.IsWritable()) {
+        GST_INFO("=== Configuring Sequencer Set %d ===", i);
+        setSelector.SetValue(i);
+        GST_INFO("SequencerSetSelector set to: %d", i);
+
+        // Load the current set configuration (ace 2 uses SequencerSetLoad)
+        GenApi::INode* loadNode = nodemap.GetNode("SequencerSetLoad");
+        if (loadNode) {
+          GenApi::ICommand* loadCmd = dynamic_cast<GenApi::ICommand*>(loadNode);
+          if (loadCmd && GenApi::IsWritable(loadCmd)) {
+            GST_INFO("Executing SequencerSetLoad for Set %d", i);
+            loadCmd->Execute();
+            GST_INFO("SequencerSetLoad executed successfully for Set %d", i);
+          } else {
+            GST_DEBUG("SequencerSetLoad command not writable for Set %d", i);
+          }
+        } else {
+          GST_DEBUG("SequencerSetLoad command not found - changes may apply immediately");
+        }
+      } else {
+        GST_WARNING("Cannot select sequencer set %d - SequencerSetSelector not available", i);
+      }
+
+      // Preserve image format settings in each set
+      if (seqWidth.IsValid() && seqWidth.IsWritable()) {
+        gint64 current_w = seqWidth.GetValue();
+        GST_INFO("Set %d: Width is %ld, setting to %ld", i, current_w, width_val);
+        seqWidth.SetValue(width_val);
+        GST_INFO("Set %d: Width set to %ld", i, width_val);
+      }
+      if (seqHeight.IsValid() && seqHeight.IsWritable()) {
+        gint64 current_h = seqHeight.GetValue();
+        GST_INFO("Set %d: Height is %ld, setting to %ld", i, current_h, height_val);
+        seqHeight.SetValue(height_val);
+        GST_INFO("Set %d: Height set to %ld", i, height_val);
+      }
+      if (seqPixelFormat.IsValid() && seqPixelFormat.IsWritable()) {
+        Pylon::String_t current_fmt = seqPixelFormat.GetValue();
+        GST_INFO("Set %d: PixelFormat is %s, setting to %s", i,
+                 current_fmt.c_str(), pixelformat_val.c_str());
+        seqPixelFormat.SetValue(pixelformat_val);
+        GST_INFO("Set %d: PixelFormat set to %s", i, pixelformat_val.c_str());
+      }
+
+      // Preserve Gain in each set
+      if (has_gain) {
+        if (seqGain.IsValid() && seqGain.IsWritable()) {
+          gdouble current_gain = seqGain.GetValue();
+          GST_INFO("Set %d: Gain is %.2f, setting to %.2f", i, current_gain, gain_val);
+          seqGain.SetValue(gain_val);
+          GST_INFO("Set %d: Gain set to %.2f", i, gain_val);
+        } else if (seqGainRaw.IsValid() && seqGainRaw.IsWritable()) {
+          gint64 current_gain = seqGainRaw.GetValue();
+          GST_INFO("Set %d: GainRaw is %ld, setting to %.0f", i, current_gain, gain_val);
+          seqGainRaw.SetValue((gint64)gain_val);
+          GST_INFO("Set %d: GainRaw set to %.0f", i, gain_val);
+        }
+      }
+
+      // Set exposure time for this set
+      if (exposureTime.IsValid() && exposureTime.IsWritable()) {
+        gdouble current_exp = exposureTime.GetValue();
+        GST_INFO("Set %d: ExposureTime was %.2f μs, setting to %.2f μs",
+                 i, current_exp, exposure);
+        exposureTime.SetValue(exposure);
+        GST_INFO("Set %d: ExposureTime configured to %.2f μs", i, exposure);
+      } else {
+        GST_WARNING("Cannot set exposure time for set %d", i);
+      }
+
+      // Configure next set in sequence
+      if (setNext.IsValid() && setNext.IsWritable()) {
+        gint64 current_next = setNext.GetValue();
+        GST_INFO("Set %d: SequencerSetNext was %ld, setting to %d",
+                 i, current_next, next_set);
+        setNext.SetValue(next_set);
+        GST_INFO("Set %d: SequencerSetNext configured to %d", i, next_set);
+      } else {
+        GST_WARNING("Cannot configure next set for set %d", i);
+      }
+
+      // Save the configured set (ace 2 uses SequencerSetSave)
+      GenApi::INode* saveNode = nodemap.GetNode("SequencerSetSave");
+      if (saveNode) {
+        GenApi::ICommand* saveCmd = dynamic_cast<GenApi::ICommand*>(saveNode);
+        if (saveCmd && GenApi::IsWritable(saveCmd)) {
+          GST_INFO("Executing SequencerSetSave for Set %d", i);
+          saveCmd->Execute();
+          GST_INFO("SequencerSetSave executed successfully for Set %d", i);
+        } else {
+          GST_DEBUG("SequencerSetSave command not writable for Set %d", i);
+        }
+      } else {
+        GST_DEBUG("SequencerSetSave command not found - changes may apply immediately");
+      }
+    }
+
+    // Exit configuration mode
+    if (seqConfigMode.IsValid() && seqConfigMode.IsWritable()) {
+      GST_INFO("Exiting sequencer configuration mode");
+      seqConfigMode.SetValue("Off");
+      Pylon::String_t config_mode = seqConfigMode.GetValue();
+      GST_INFO("SequencerConfigurationMode set to: %s", config_mode.c_str());
+    }
+
+    // Enable sequencer mode
+    if (sequencerMode.IsWritable()) {
+      GST_INFO("Enabling sequencer mode");
+      sequencerMode.SetValue("On");
+      Pylon::String_t seq_mode = sequencerMode.GetValue();
+      GST_INFO("SequencerMode set to: %s", seq_mode.c_str());
+    } else {
+      GST_WARNING("Cannot enable sequencer mode - not writable");
+    }
+
+    g_strfreev(exposures);
+    GST_INFO("HDR sequence configuration completed successfully");
+
+  } catch (const Pylon::GenericException &e) {
+    g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
+                "Failed to configure HDR sequence: %s", e.GetDescription());
+    return FALSE;
+  }
+
+  return TRUE;
+}
+
+gboolean gst_pylon_configure_dual_hdr_sequence(GstPylon *self,
+                                               const gchar *hdr_sequence1,
+                                               const gchar *hdr_sequence2,
+                                               GError **err) {
+  g_return_val_if_fail(self, FALSE);
+  g_return_val_if_fail(err && *err == NULL, FALSE);
+
+  if (!hdr_sequence1 || strlen(hdr_sequence1) == 0 ||
+      !hdr_sequence2 || strlen(hdr_sequence2) == 0) {
+    g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
+                "Both HDR sequences must be specified for dual profile mode");
+    return FALSE;
+  }
+
+  GST_INFO("Configuring dual HDR profiles with path branching:");
+  GST_INFO("  Profile 0: %s", hdr_sequence1);
+  GST_INFO("  Profile 1: %s", hdr_sequence2);
+
+  try {
+    GenApi::INodeMap &nodemap = self->camera->GetNodeMap();
+
+    // Parse exposure values from both sequences
+    gchar **exposures1 = g_strsplit(hdr_sequence1, ",", -1);
+    gchar **exposures2 = g_strsplit(hdr_sequence2, ",", -1);
+    guint num_exposures1 = g_strv_length(exposures1);
+    guint num_exposures2 = g_strv_length(exposures2);
+
+    // Validate sequence lengths
+    if (num_exposures1 == 0 || num_exposures2 == 0) {
+      g_strfreev(exposures1);
+      g_strfreev(exposures2);
+      g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
+                  "HDR sequences must have at least 1 exposure value");
+      return FALSE;
+    }
+
+    // Check maximum sets limit (most cameras support 16 sets)
+    guint total_sets = num_exposures1 + num_exposures2;
+    if (total_sets > 16) {
+      g_strfreev(exposures1);
+      g_strfreev(exposures2);
+      g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
+                  "Total number of sets (%d) exceeds typical camera limit of 16", total_sets);
+      return FALSE;
+    }
+
+    GST_INFO("Profile 0: %d exposures, Profile 1: %d exposures, Total sets: %d",
+              num_exposures1, num_exposures2, total_sets);
+
+    // Check if sequencer features are available
+    Pylon::CEnumParameter sequencerMode(nodemap, "SequencerMode");
+    if (!sequencerMode.IsValid()) {
+      g_strfreev(exposures1);
+      g_strfreev(exposures2);
+      g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
+                  "Camera does not support sequencer mode");
+      return FALSE;
+    }
+
+    // Get current camera settings BEFORE entering configuration mode
+    Pylon::CIntegerParameter currentWidth(nodemap, "Width");
+    Pylon::CIntegerParameter currentHeight(nodemap, "Height");
+    Pylon::CEnumParameter currentPixelFormat(nodemap, "PixelFormat");
+
+    gint64 width_val = currentWidth.GetValue();
+    gint64 height_val = currentHeight.GetValue();
+    Pylon::String_t pixelformat_val = currentPixelFormat.GetValue();
+
+    GST_INFO("Current camera settings: Width=%ld, Height=%ld, PixelFormat=%s",
+              width_val, height_val, pixelformat_val.c_str());
+
+    // First make sure sequencer mode is OFF
+    if (sequencerMode.IsWritable()) {
+      sequencerMode.SetValue("Off");
+      GST_INFO("Sequencer mode disabled for configuration");
+    }
+
+    // Enter sequencer configuration mode
+    Pylon::CEnumParameter seqConfigMode(nodemap, "SequencerConfigurationMode");
+    if (seqConfigMode.IsValid() && seqConfigMode.IsWritable()) {
+      seqConfigMode.SetValue("On");
+      GST_INFO("Entered sequencer configuration mode");
+    }
+
+    // Get sequencer parameters
+    Pylon::CIntegerParameter setSelector(nodemap, "SequencerSetSelector");
+    Pylon::CIntegerParameter pathSelector(nodemap, "SequencerPathSelector");
+    Pylon::CIntegerParameter setNext(nodemap, "SequencerSetNext");
+    Pylon::CEnumParameter seqTriggerSource(nodemap, "SequencerTriggerSource");
+    Pylon::CIntegerParameter seqWidth(nodemap, "Width");
+    Pylon::CIntegerParameter seqHeight(nodemap, "Height");
+    Pylon::CEnumParameter seqPixelFormat(nodemap, "PixelFormat");
+    Pylon::CFloatParameter exposureTime(nodemap, "ExposureTime");
+
+    // Check for path selector support
+    if (!pathSelector.IsValid()) {
+      g_strfreev(exposures1);
+      g_strfreev(exposures2);
+      g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
+                  "Camera does not support SequencerPathSelector - required for dual profiles");
+      return FALSE;
+    }
+
+    // Configure sequencer start set to 0
+    Pylon::CIntegerParameter seqSetStart(nodemap, "SequencerSetStart");
+    if (seqSetStart.IsValid() && seqSetStart.IsWritable()) {
+      seqSetStart.SetValue(0);
+      GST_INFO("SequencerSetStart = 0");
+    }
+
+    // Get Gain parameter if available
+    Pylon::CFloatParameter seqGain;
+    Pylon::CIntegerParameter seqGainRaw;
+    gdouble gain_val = -1;
+    bool has_gain = false;
+
+    if (nodemap.GetNode("Gain")) {
+      seqGain.Attach(nodemap.GetNode("Gain"));
+      if (seqGain.IsValid() && seqGain.IsReadable()) {
+        gain_val = seqGain.GetValue();
+        has_gain = true;
+      }
+    } else if (nodemap.GetNode("GainRaw")) {
+      seqGainRaw.Attach(nodemap.GetNode("GainRaw"));
+      if (seqGainRaw.IsValid() && seqGainRaw.IsReadable()) {
+        gain_val = seqGainRaw.GetValue();
+        has_gain = true;
+      }
+    }
+
+    // Check exposure time parameter
+    if (!exposureTime.IsValid()) {
+      // Try alternative name
+      exposureTime.Attach(nodemap.GetNode("ExposureTimeAbs"));
+      if (!exposureTime.IsValid()) {
+        g_strfreev(exposures1);
+        g_strfreev(exposures2);
+        g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
+                    "Camera does not have ExposureTime parameter");
+        return FALSE;
+      }
+    }
+
+    // Helper lambda to configure common settings for each set
+    auto configureCommonSettings = [&](guint set_num, gdouble exposure) {
+      GST_INFO("=== Configuring Set %d ===", set_num);
+
+      // Select the set
+      setSelector.SetValue(set_num);
+
+      // Load the current set configuration
+      GenApi::INode* loadNode = nodemap.GetNode("SequencerSetLoad");
+      if (loadNode) {
+        GenApi::ICommand* loadCmd = dynamic_cast<GenApi::ICommand*>(loadNode);
+        if (loadCmd && GenApi::IsWritable(loadCmd)) {
+          loadCmd->Execute();
+        }
+      }
+
+      // Set common parameters (width, height, pixel format, gain)
+      if (seqWidth.IsValid() && seqWidth.IsWritable()) {
+        seqWidth.SetValue(width_val);
+      }
+      if (seqHeight.IsValid() && seqHeight.IsWritable()) {
+        seqHeight.SetValue(height_val);
+      }
+      if (seqPixelFormat.IsValid() && seqPixelFormat.IsWritable()) {
+        seqPixelFormat.SetValue(pixelformat_val);
+      }
+      if (has_gain) {
+        if (seqGain.IsValid() && seqGain.IsWritable()) {
+          seqGain.SetValue(gain_val);
+        } else if (seqGainRaw.IsValid() && seqGainRaw.IsWritable()) {
+          seqGainRaw.SetValue((gint64)gain_val);
+        }
+      }
+
+      // Set exposure time
+      exposureTime.SetValue(exposure);
+      GST_INFO("  ExposureTime = %.2f μs", exposure);
+    };
+
+    // Helper lambda to save current set configuration
+    auto saveSet = [&]() {
+      GenApi::INode* saveNode = nodemap.GetNode("SequencerSetSave");
+      if (saveNode) {
+        GenApi::ICommand* saveCmd = dynamic_cast<GenApi::ICommand*>(saveNode);
+        if (saveCmd && GenApi::IsWritable(saveCmd)) {
+          saveCmd->Execute();
+          GST_DEBUG("  SequencerSetSave executed");
+        }
+      }
+    };
+
+    // Calculate set indices for profiles
+    guint profile0_first = 0;
+    guint profile0_last = num_exposures1 - 1;
+    guint profile1_first = num_exposures1;
+    guint profile1_last = num_exposures1 + num_exposures2 - 1;
+
+    GST_INFO("Set allocation: Profile 0 [%d-%d], Profile 1 [%d-%d]",
+             profile0_first, profile0_last, profile1_first, profile1_last);
+
+    // ===== Configure Profile 0 sets =====
+    for (guint i = 0; i < num_exposures1; i++) {
+      guint set_num = i;
+      gdouble exposure = g_strtod(exposures1[i], NULL);
+
+      GST_INFO("=== Configuring Set %d (Profile 0, exposure %d/%d: %.2fμs) ===",
+               set_num, i+1, num_exposures1, exposure);
+
+      configureCommonSettings(set_num, exposure);
+
+      if (i == profile0_last) {
+        // Last set of Profile 0 - add branching
+
+        // Path 0: Switch to Profile 1 on SoftwareSignal1 (checked first)
+        pathSelector.SetValue(0);
+        setNext.SetValue(profile1_first);
+        if (seqTriggerSource.IsValid()) {
+          if (seqTriggerSource.CanSetValue("SoftwareSignal1")) {
+            seqTriggerSource.SetValue("SoftwareSignal1");
+            GST_INFO("  Path 0: Next = %d, Trigger = SoftwareSignal1 (switch to Profile 1)", profile1_first);
+          } else {
+            GST_WARNING("  Path 0: Cannot set trigger to SoftwareSignal1");
+          }
+        }
+        saveSet();
+
+        // Path 1: Default path - continue in Profile 0 with ExposureActive trigger
+        pathSelector.SetValue(1);
+        setNext.SetValue(profile0_first);
+        if (seqTriggerSource.IsValid()) {
+          if (seqTriggerSource.CanSetValue("ExposureActive")) {
+            seqTriggerSource.SetValue("ExposureActive");
+            GST_INFO("  Path 1 (default): Next = %d, Trigger = ExposureActive (loop Profile 0)", profile0_first);
+          } else {
+            GST_WARNING("  Path 1: Cannot set trigger to ExposureActive");
+          }
+        }
+        saveSet();
+
+      } else {
+        // Non-branching set - single path to next set
+        pathSelector.SetValue(0);
+        setNext.SetValue(set_num + 1);
+        if (seqTriggerSource.IsValid()) {
+          if (seqTriggerSource.CanSetValue("ExposureActive")) {
+            seqTriggerSource.SetValue("ExposureActive");
+            GST_INFO("  Path 0: Next = %d, Trigger = ExposureActive", set_num + 1);
+          } else {
+            GST_WARNING("  Path 0: Cannot set trigger to ExposureActive");
+          }
+        }
+        saveSet();
+      }
+    }
+
+    // ===== Configure Profile 1 sets =====
+    for (guint i = 0; i < num_exposures2; i++) {
+      guint set_num = profile1_first + i;
+      gdouble exposure = g_strtod(exposures2[i], NULL);
+
+      GST_INFO("=== Configuring Set %d (Profile 1, exposure %d/%d: %.2fμs) ===",
+               set_num, i+1, num_exposures2, exposure);
+
+      configureCommonSettings(set_num, exposure);
+
+      if (set_num == profile1_last) {
+        // Last set of Profile 1 - add branching
+
+        // Path 0: Switch back to Profile 0 on SoftwareSignal2 (checked first)
+        pathSelector.SetValue(0);
+        setNext.SetValue(profile0_first);
+        if (seqTriggerSource.IsValid()) {
+          if (seqTriggerSource.CanSetValue("SoftwareSignal2")) {
+            seqTriggerSource.SetValue("SoftwareSignal2");
+            GST_INFO("  Path 0: Next = %d, Trigger = SoftwareSignal2 (switch to Profile 0)", profile0_first);
+          } else {
+            GST_WARNING("  Path 0: Cannot set trigger to SoftwareSignal2");
+          }
+        }
+        saveSet();
+
+        // Path 1: Default path - continue in Profile 1 with ExposureActive trigger
+        pathSelector.SetValue(1);
+        setNext.SetValue(profile1_first);
+        if (seqTriggerSource.IsValid()) {
+          if (seqTriggerSource.CanSetValue("ExposureActive")) {
+            seqTriggerSource.SetValue("ExposureActive");
+            GST_INFO("  Path 1 (default): Next = %d, Trigger = ExposureActive (loop Profile 1)", profile1_first);
+          } else {
+            GST_WARNING("  Path 1: Cannot set trigger to ExposureActive");
+          }
+        }
+        saveSet();
+
+      } else {
+        // Non-branching set - single path to next set
+        pathSelector.SetValue(0);
+        setNext.SetValue(set_num + 1);
+        if (seqTriggerSource.IsValid()) {
+          if (seqTriggerSource.CanSetValue("ExposureActive")) {
+            seqTriggerSource.SetValue("ExposureActive");
+            GST_INFO("  Path 0: Next = %d, Trigger = ExposureActive", set_num + 1);
+          } else {
+            GST_WARNING("  Path 0: Cannot set trigger to ExposureActive");
+          }
+        }
+        saveSet();
+      }
+    }
+
+    // Exit configuration mode
+    if (seqConfigMode.IsValid() && seqConfigMode.IsWritable()) {
+      seqConfigMode.SetValue("Off");
+      GST_INFO("Exited sequencer configuration mode");
+    }
+
+    // Enable sequencer mode
+    if (sequencerMode.IsWritable()) {
+      sequencerMode.SetValue("On");
+      GST_INFO("Sequencer mode enabled");
+    }
+
+    g_strfreev(exposures1);
+    g_strfreev(exposures2);
+    GST_INFO("Dual HDR profile configuration with path branching completed successfully");
+
+  } catch (const Pylon::GenericException &e) {
+    g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
+                "Failed to configure dual HDR profiles: %s", e.GetDescription());
+    return FALSE;
+  }
+
+  return TRUE;
+}
+
+gboolean gst_pylon_switch_hdr_profile(GstPylon *self, gint profile, GError **err) {
+  g_return_val_if_fail(self, FALSE);
+  g_return_val_if_fail(err && *err == NULL, FALSE);
+  g_return_val_if_fail(profile == 0 || profile == 1, FALSE);
+
+  try {
+    GenApi::INodeMap &nodemap = self->camera->GetNodeMap();
+
+    // Use SoftwareSignalSelector and SoftwareSignalPulse to trigger the profile switch
+    Pylon::CEnumParameter signalSelector(nodemap, "SoftwareSignalSelector");
+    Pylon::CCommandParameter signalPulse(nodemap, "SoftwareSignalPulse");
+
+    if (signalSelector.IsValid() && signalPulse.IsValid()) {
+      // Select the appropriate software signal
+      // To switch TO Profile 1: trigger SoftwareSignal1 (Set 1 Path 1 listens for this)
+      // To switch TO Profile 0: trigger SoftwareSignal2 (Set 4 Path 1 listens for this)
+      const char* signal_value = (profile == 1) ? "SoftwareSignal1" : "SoftwareSignal2";
+
+      GST_DEBUG("Attempting to switch to profile %d using signal %s", profile, signal_value);
+
+      if (signalSelector.CanSetValue(signal_value)) {
+        signalSelector.SetValue(signal_value);
+        GST_DEBUG("SoftwareSignalSelector set to %s", signal_value);
+
+        // Execute the pulse command
+        if (GenApi::IsWritable(signalPulse.GetNode())) {
+          signalPulse.Execute();
+          GST_INFO("Executed %s pulse to switch to HDR Profile %d", signal_value, profile);
+
+          // Verify the signal was set correctly
+          try {
+            Pylon::String_t current_signal = signalSelector.GetValue();
+            GST_DEBUG("After pulse, SoftwareSignalSelector reads: %s", current_signal.c_str());
+          } catch (...) {
+            GST_DEBUG("Could not read back SoftwareSignalSelector value");
+          }
+
+          return TRUE;
+        } else {
+          GST_WARNING("SoftwareSignalPulse command not writable after selecting %s", signal_value);
+        }
+      } else {
+        GST_WARNING("Cannot set SoftwareSignalSelector to %s", signal_value);
+      }
+    } else {
+      GST_WARNING("SoftwareSignalSelector=%d, SoftwareSignalPulse=%d",
+                  signalSelector.IsValid(), signalPulse.IsValid());
+    }
+
+    // If the primary method didn't work, log more details for debugging
+    GST_WARNING("Software signal switching failed - debugging info:");
+
+    // Check what signals are available
+    if (signalSelector.IsValid()) {
+      GenApi::StringList_t available_signals;
+      signalSelector.GetSettableValues(available_signals);
+      GST_WARNING("Available software signals:");
+      for (const auto& sig : available_signals) {
+        GST_WARNING("  - %s", sig.c_str());
+      }
+
+      // Try to read current value
+      try {
+        Pylon::String_t current = signalSelector.GetValue();
+        GST_WARNING("Current SoftwareSignalSelector value: %s", current.c_str());
+      } catch (...) {
+        GST_WARNING("Could not read current SoftwareSignalSelector value");
+      }
+    }
+
+    GST_ERROR("Could not trigger software signal for profile switching");
+    GST_ERROR("Attempting to switch to profile %d failed", profile);
+    GST_ERROR("The sequencer will continue with the current profile");
+
+    // Don't return FALSE to avoid failing the pipeline, but the switch didn't work
+    return TRUE;
+
+  } catch (const Pylon::GenericException &e) {
+    g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
+                "Failed to switch HDR profile: %s", e.GetDescription());
+    return FALSE;
+  }
+}
+
 void gst_pylon_free(GstPylon *self) {
   g_return_if_fail(self);
 

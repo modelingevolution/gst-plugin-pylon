@@ -277,6 +277,95 @@ Configure a hardware trigger on Line1 for the trigger FrameStart:
 gst-launch-1.0 pylonsrc cam::TriggerSource-FrameStart=Line1 cam::TriggerMode-FrameStart=On ! videoconvert ! autovideosink
 ```
 
+### HDR Sequencer Mode
+
+The plugin supports High Dynamic Range (HDR) imaging through camera sequencer mode, allowing automatic cycling through multiple exposure times. Two HDR profiles can be configured and switched dynamically during runtime.
+
+#### Single HDR Profile
+
+Configure a single HDR sequence using the `hdr-sequence` property with comma-separated exposure values in microseconds:
+
+```
+gst-launch-1.0 pylonsrc hdr-sequence="19,150" ! videoconvert ! autovideosink
+```
+
+This creates an HDR sequence cycling between 19μs and 150μs exposures.
+
+#### Dual HDR Profile System
+
+For applications requiring multiple HDR profiles, the plugin supports two switchable profiles with variable-length sequences:
+
+* **Profile 0**: Configured via `hdr-sequence` property (1-5+ exposures)
+* **Profile 1**: Configured via `hdr-sequence2` property (1-5+ exposures)
+* **Profile switching**: Use `hdr-profile` property (0 or 1) to switch between profiles at runtime
+* **Variable lengths**: Each profile can have a different number of exposures
+
+**Example - Configure dual profiles with different lengths:**
+```
+# 2 exposures in Profile 0, 3 exposures in Profile 1
+gst-launch-1.0 pylonsrc hdr-sequence="19,150" hdr-sequence2="250,350,500" hdr-profile=0 ! videoconvert ! autovideosink
+
+# 3 exposures in Profile 0, 2 exposures in Profile 1
+gst-launch-1.0 pylonsrc hdr-sequence="10,30,90" hdr-sequence2="100,200" hdr-profile=0 ! videoconvert ! autovideosink
+
+# Single exposure per profile (fast switching)
+gst-launch-1.0 pylonsrc hdr-sequence="50" hdr-sequence2="200" hdr-profile=0 ! videoconvert ! autovideosink
+```
+
+**Sequencer Configuration with Path Branching:**
+
+The implementation dynamically configures sequencer sets based on sequence lengths. Only the last set of each profile has branching paths:
+
+**Example for 2-exposure Profile 0 and 2-exposure Profile 1:**
+
+| Set # | Exposure | Path | Next Set | Trigger Source | Description |
+|-------|----------|------|----------|----------------|-------------|
+| **Set 0** | 19μs | 0 | 1 | ExposureActive | Profile 0, frame 1 |
+| **Set 1** | 150μs | 0 | 2 | SoftwareSignal1 | Jump to Profile 1 (priority) |
+| | | 1 | 0 | ExposureActive | Continue Profile 0 (default) |
+| **Set 2** | 250μs | 0 | 3 | ExposureActive | Profile 1, frame 1 |
+| **Set 3** | 350μs | 0 | 0 | SoftwareSignal2 | Jump to Profile 0 (priority) |
+| | | 1 | 2 | ExposureActive | Continue Profile 1 (default) |
+
+**Example for 3-exposure Profile 0 and 2-exposure Profile 1:**
+
+| Set # | Exposure | Path | Next Set | Trigger Source | Description |
+|-------|----------|------|----------|----------------|-------------|
+| **Set 0** | 10μs | 0 | 1 | ExposureActive | Profile 0, frame 1 |
+| **Set 1** | 30μs | 0 | 2 | ExposureActive | Profile 0, frame 2 |
+| **Set 2** | 90μs | 0 | 3 | SoftwareSignal1 | Jump to Profile 1 (priority) |
+| | | 1 | 0 | ExposureActive | Continue Profile 0 (default) |
+| **Set 3** | 100μs | 0 | 4 | ExposureActive | Profile 1, frame 1 |
+| **Set 4** | 200μs | 0 | 0 | SoftwareSignal2 | Jump to Profile 0 (priority) |
+| | | 1 | 3 | ExposureActive | Continue Profile 1 (default) |
+
+**Path Branching Details:**
+- Only the **last set** of each profile has branching paths using `SequencerPathSelector`
+- Path 0 (checked first): Software signal trigger - takes priority when signal is active
+- Path 1 (fallback): ExposureActive trigger - always fires after exposure completes
+- This ensures profile switching is checked first, with automatic fallback to continue current profile
+- All non-branching sets use a single path with ExposureActive trigger
+
+**Runtime behavior:**
+- Starts with Profile 0 by default
+- Switch to Profile 1: Set `hdr-profile=1` (triggers SoftwareSignal1 after completing current profile's window)
+- Switch to Profile 0: Set `hdr-profile=0` (triggers SoftwareSignal2 after completing current profile's window)
+- Frame-synchronized switching ensures no dropped frames
+- Switching occurs after completing all exposures in the current profile's window
+- Software signal is automatically retried for up to 5 frames to ensure reliable switching
+
+**Requirements:**
+- Camera must support sequencer mode features
+- Camera must support `SequencerPathSelector` for dual profile mode
+- Minimum 1 exposure value per profile
+- Maximum total of 16 sets (sum of exposures in both profiles)
+- Leave properties empty to disable HDR sequencer mode
+
+**Limitations:**
+- Some cameras may support more than 16 sequencer sets, but 16 is used as a safe default
+- Software signals (SoftwareSignal1/2) must be available in the camera
+- ExposureActive trigger must be supported for sequencer operation
+
 ### Chunks and Capture metadata
 
 Chunk support is available. The selected chunks will be appended to each gstreamer buffer as meta data.
@@ -292,11 +381,20 @@ The pylon image meta data ( pylon GrabResult ) is appended per default. The valu
 * OffsetX/Y
 * Camera Timestamp
 
+**Exposure Time in Metadata**
+
+When ExposureTime chunk is enabled, the actual exposure time used for each frame is included in the buffer metadata. This is particularly useful for HDR sequences where each frame may have a different exposure time.
+
 **Example**
 
 Enable Timestamp, ExposureTime and CounterValue chunks:
 ```
 gst-launch-1.0 pylonsrc cam::ChunkModeActive=True cam::ChunkEnable-Timestamp=True cam::ChunkEnable-ExposureTime=true cam::ChunkEnable-CounterValue=true ! videoconvert ! autovideosink
+```
+
+For HDR sequences with chunks enabled:
+```
+gst-launch-1.0 pylonsrc hdr-sequence="19,150" cam::ChunkModeActive=True cam::ChunkEnable-ExposureTime=true ! videoconvert ! autovideosink
 ```
 
 **GstMetaPylon**

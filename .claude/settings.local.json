@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:docs.baslerweb.com)",
+      "Bash(find:*)",
+      "Read(//usr/lib/**)",
+      "Bash(meson:*)",
+      "Bash(ninja --version)",
+      "Bash(pkg-config:*)",
+      "Read(//opt/**)",
+      "Read(//usr/local/**)",
+      "Bash(dpkg:*)",
+      "Bash(sudo apt:*)",
+      "Bash(sudo apt install:*)",
+      "Bash(chmod:*)",
+      "Bash(./build.sh)",
+      "Bash(gst-inspect-1.0:*)",
+      "Bash(ninja:*)",
+      "Bash(gst-launch-1.0:*)",
+      "Bash(python3:*)",
+      "Bash(source:*)",
+      "Bash(pip install:*)",
+      "Bash(./diagnose_sequencer.sh:*)",
+      "Bash(GST_DEBUG=pylonsrc:4,pylon:4 gst-launch-1.0 pylonsrc hdr-sequence=\"19,150\" num-buffers=10 ! video/x-raw,width=640,height=480 ! fakesink sync=false)",
+      "Bash(GST_DEBUG=pylonsrc:4 gst-launch-1.0 pylonsrc hdr-sequence=\"19,150\" num-buffers=2 ! fakesink)",
+      "Bash(export:*)",
+      "Bash(GST_DEBUG=pylonsrc:5,pylon:5 gst-launch-1.0 pylonsrc hdr-sequence=\"19,150\" num-buffers=1 ! fakesink)",
+      "Bash(GST_DEBUG=pylonsrc:4,pylon:4 gst-launch-1.0 pylonsrc hdr-sequence=\"19,150\" num-buffers=2 ! video/x-raw,format=RGB ! fakesink)",
+      "Bash(GST_DEBUG=pylonsrc:6,pylon:6 gst-launch-1.0 pylonsrc hdr-sequence=\"19,150\" num-buffers=1 ! video/x-raw,format=RGB,width=640,height=480 ! fakesink)",
+      "Bash(GST_DEBUG=pylonsrc:4 gst-launch-1.0 pylonsrc hdr-sequence=\"19,150\" num-buffers=2 ! video/x-raw,format=GRAY8,width=640,height=480 ! fakesink)",
+      "Bash(venv/bin/python:*)",
+      "Bash(./install.sh)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
