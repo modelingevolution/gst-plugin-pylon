@@ -1,5 +1,5 @@
 dependencies = [gstpylon_dep]
-include_directories = [configinc]
+include_directories = [configinc, include_directories('../..')]
 cpp_args = [gst_plugin_pylon_args]
 
 pylon_sources = [
@@ -10,6 +10,10 @@ pylon_sources = [
   'gstpylonplugin.cpp',
   'gstpylonsrc.cpp',
   'gstpylonsysmembufferfactory.cpp',
+  'gsthdrmeta.cpp',
+  'HdrMetadataPlugin.cpp',
+  'HdrProfileSwitcher.cpp',
+  '../../HdrMetadataProvider/HdrMetadataProvider.cpp',
 ]
 
 nvds_dep = cc.find_library('nvbufsurface',

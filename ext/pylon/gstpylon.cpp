@@ -121,6 +121,9 @@ static gchar *gst_pylon_get_string_properties(
 
 static constexpr gint DEFAULT_ALIGNMENT = 35;
 
+// Default trigger source for HDR sequencer transitions
+static constexpr const char* HDR_SEQUENCER_TRIGGER = "ExposureActive";
+
 struct _GstPylon {
   GstElement *gstpylonsrc;
   std::shared_ptr<Pylon::CBaslerUniversalInstantCamera> camera =
@@ -492,7 +495,7 @@ gboolean gst_pylon_configure_hdr_sequence(GstPylon *self, const gchar *hdr_seque
 
       // Try common trigger sources in order of preference
       // ExposureActive confirmed to work on a2A1920-51gcPRO
-      const char* trigger_options[] = {"ExposureActive", "ExposureStart", "AcquisitionActive", "FrameStart", "AcquisitionStart", NULL};
+      const char* trigger_options[] = {HDR_SEQUENCER_TRIGGER, "ExposureStart", "AcquisitionActive", "FrameStart", "AcquisitionStart", NULL};
       for (int i = 0; trigger_options[i] != NULL; i++) {
         if (seqTriggerSource.CanSetValue(trigger_options[i])) {
           GST_INFO("Setting sequencer trigger source to %s", trigger_options[i]);
@@ -933,11 +936,11 @@ gboolean gst_pylon_configure_dual_hdr_sequence(GstPylon *self,
         pathSelector.SetValue(1);
         setNext.SetValue(profile0_first);
         if (seqTriggerSource.IsValid()) {
-          if (seqTriggerSource.CanSetValue("ExposureActive")) {
-            seqTriggerSource.SetValue("ExposureActive");
-            GST_INFO("  Path 1 (default): Next = %d, Trigger = ExposureActive (loop Profile 0)", profile0_first);
+          if (seqTriggerSource.CanSetValue(HDR_SEQUENCER_TRIGGER)) {
+            seqTriggerSource.SetValue(HDR_SEQUENCER_TRIGGER);
+            GST_INFO("  Path 1 (default): Next = %d, Trigger = %s (loop Profile 0)", profile0_first, HDR_SEQUENCER_TRIGGER);
           } else {
-            GST_WARNING("  Path 1: Cannot set trigger to ExposureActive");
+            GST_WARNING("  Path 1: Cannot set trigger to %s", HDR_SEQUENCER_TRIGGER);
           }
         }
         saveSet();
@@ -947,11 +950,11 @@ gboolean gst_pylon_configure_dual_hdr_sequence(GstPylon *self,
         pathSelector.SetValue(0);
         setNext.SetValue(set_num + 1);
         if (seqTriggerSource.IsValid()) {
-          if (seqTriggerSource.CanSetValue("ExposureActive")) {
-            seqTriggerSource.SetValue("ExposureActive");
-            GST_INFO("  Path 0: Next = %d, Trigger = ExposureActive", set_num + 1);
+          if (seqTriggerSource.CanSetValue(HDR_SEQUENCER_TRIGGER)) {
+            seqTriggerSource.SetValue(HDR_SEQUENCER_TRIGGER);
+            GST_INFO("  Path 0: Next = %d, Trigger = %s", set_num + 1, HDR_SEQUENCER_TRIGGER);
           } else {
-            GST_WARNING("  Path 0: Cannot set trigger to ExposureActive");
+            GST_WARNING("  Path 0: Cannot set trigger to %s", HDR_SEQUENCER_TRIGGER);
           }
         }
         saveSet();
@@ -988,11 +991,11 @@ gboolean gst_pylon_configure_dual_hdr_sequence(GstPylon *self,
         pathSelector.SetValue(1);
         setNext.SetValue(profile1_first);
         if (seqTriggerSource.IsValid()) {
-          if (seqTriggerSource.CanSetValue("ExposureActive")) {
-            seqTriggerSource.SetValue("ExposureActive");
-            GST_INFO("  Path 1 (default): Next = %d, Trigger = ExposureActive (loop Profile 1)", profile1_first);
+          if (seqTriggerSource.CanSetValue(HDR_SEQUENCER_TRIGGER)) {
+            seqTriggerSource.SetValue(HDR_SEQUENCER_TRIGGER);
+            GST_INFO("  Path 1 (default): Next = %d, Trigger = %s (loop Profile 1)", profile1_first, HDR_SEQUENCER_TRIGGER);
           } else {
-            GST_WARNING("  Path 1: Cannot set trigger to ExposureActive");
+            GST_WARNING("  Path 1: Cannot set trigger to %s", HDR_SEQUENCER_TRIGGER);
           }
         }
         saveSet();
@@ -1002,11 +1005,11 @@ gboolean gst_pylon_configure_dual_hdr_sequence(GstPylon *self,
         pathSelector.SetValue(0);
         setNext.SetValue(set_num + 1);
         if (seqTriggerSource.IsValid()) {
-          if (seqTriggerSource.CanSetValue("ExposureActive")) {
-            seqTriggerSource.SetValue("ExposureActive");
-            GST_INFO("  Path 0: Next = %d, Trigger = ExposureActive", set_num + 1);
+          if (seqTriggerSource.CanSetValue(HDR_SEQUENCER_TRIGGER)) {
+            seqTriggerSource.SetValue(HDR_SEQUENCER_TRIGGER);
+            GST_INFO("  Path 0: Next = %d, Trigger = %s", set_num + 1, HDR_SEQUENCER_TRIGGER);
           } else {
-            GST_WARNING("  Path 0: Cannot set trigger to ExposureActive");
+            GST_WARNING("  Path 0: Cannot set trigger to %s", HDR_SEQUENCER_TRIGGER);
           }
         }
         saveSet();
@@ -1304,6 +1307,68 @@ gboolean gst_pylon_capture(GstPylon *self, GstBuffer **buf,
 #endif
 
   gst_pylon_add_result_meta(self, *buf, *grab_result_ptr);
+
+  // Debug output for HDR sequences - show actual exposure time of captured frame
+  try {
+    static gint frame_counter = 0;
+    frame_counter++;
+
+    // IMPORTANT: Read exposure from chunk data in the grab result
+    // This gives us the actual exposure used for THIS specific frame
+    if ((*grab_result_ptr)->IsChunkDataAvailable()) {
+
+      // Try to access ChunkExposureTime from the grab result
+      try {
+        // The chunk parser needs to be initialized
+        (*grab_result_ptr)->GetChunkDataNodeMap();
+
+        // Now try to get the exposure time chunk
+        if ((*grab_result_ptr)->ChunkExposureTime.IsValid()) {
+          gdouble chunk_exposure = (*grab_result_ptr)->ChunkExposureTime.GetValue();
+          GST_DEBUG("HDR Frame %d - ChunkExposureTime: %.2fμs", frame_counter, chunk_exposure);
+          GST_INFO("Frame %d captured with exposure: %.2fμs (from chunk)",
+                   frame_counter, chunk_exposure);
+        } else {
+          GST_DEBUG("HDR Frame %d - ChunkExposureTime not valid in grab result", frame_counter);
+
+          // Try alternative chunk name
+          GenApi::INodeMap &chunkNodeMap = (*grab_result_ptr)->GetChunkDataNodeMap();
+          GenApi::CFloatPtr exposureChunk = chunkNodeMap.GetNode("ChunkExposureTime");
+          if (!exposureChunk.IsValid()) {
+            exposureChunk = chunkNodeMap.GetNode("ChunkExposureTimeAbs");
+          }
+
+          if (exposureChunk.IsValid()) {
+            gdouble chunk_exp = exposureChunk->GetValue();
+            GST_DEBUG("HDR Frame %d - Chunk exposure (alt): %.2fμs", frame_counter, chunk_exp);
+            GST_INFO("Frame %d captured with exposure: %.2fμs (from alt chunk)",
+                     frame_counter, chunk_exp);
+          } else {
+            GST_DEBUG("No exposure time found in chunk data for frame %d", frame_counter);
+          }
+        }
+      } catch (const Pylon::GenericException &chunk_err) {
+        GST_DEBUG("Error reading chunk exposure: %s", chunk_err.GetDescription());
+      }
+
+    } else {
+      GST_DEBUG("HDR Frame %d - No chunk data available", frame_counter);
+      GST_WARNING("Chunks not available - enable with cam::ChunkModeActive=True");
+
+      // Fallback: Try to estimate from sequencer if we know the pattern
+      // This is less reliable but better than nothing
+      GenApi::INodeMap &nodemap = self->camera->GetNodeMap();
+      Pylon::CIntegerParameter seqSetIndex(nodemap, "SequencerSetActive");
+      if (seqSetIndex.IsValid() && seqSetIndex.IsReadable()) {
+        gint64 active_set = seqSetIndex.GetValue();
+        GST_DEBUG("HDR Frame %d - Active sequencer set: %ld", frame_counter, active_set);
+      }
+    }
+
+  } catch (const Pylon::GenericException &e) {
+    // Don't fail on debug output errors
+    GST_DEBUG("Could not read exposure time for debug: %s", e.GetDescription());
+  }
 
   return TRUE;
 }

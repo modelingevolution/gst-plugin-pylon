@@ -30,7 +30,18 @@
       "Bash(GST_DEBUG=pylonsrc:6,pylon:6 gst-launch-1.0 pylonsrc hdr-sequence=\"19,150\" num-buffers=1 ! video/x-raw,format=RGB,width=640,height=480 ! fakesink)",
       "Bash(GST_DEBUG=pylonsrc:4 gst-launch-1.0 pylonsrc hdr-sequence=\"19,150\" num-buffers=2 ! video/x-raw,format=GRAY8,width=640,height=480 ! fakesink)",
       "Bash(venv/bin/python:*)",
-      "Bash(./install.sh)"
+      "Bash(./install.sh)",
+      "Bash(make:*)",
+      "Bash(./test_hdr_metadata)",
+      "Bash(./test_gaps_disorder)",
+      "Bash(dotnet test:*)",
+      "Bash(dotnet run:*)",
+      "Bash(dotnet add package:*)",
+      "Bash(g++:*)",
+      "Bash(./test_hdr:*)",
+      "Bash(GST_PLUGIN_PATH=builddir/ext/pylon GST_DEBUG=pylonsrc:4,hdrmeta:4 gst-launch-1.0 pylonsrc hdr-sequence=\"19,150\" num-buffers=10 ! fakesink silent=false -v)",
+      "Bash(GST_PLUGIN_PATH=/mnt/d/source/gst-plugin-pylon/builddir/ext/pylon GST_DEBUG=pylonsrc:4 gst-launch-1.0 pylonsrc hdr-sequence=\"19,150\" num-buffers=10 ! fakesink silent=false -v)",
+      "Bash(GST_DEBUG=pylonsrc:4 gst-launch-1.0 pylonsrc hdr-sequence=\"19,150\" num-buffers=10 ! fakesink silent=false -v)"
     ],
     "deny": [],
     "ask": []

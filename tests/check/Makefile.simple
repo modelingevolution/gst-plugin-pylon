@@ -1,0 +1,28 @@
+# Simple Makefile for HdrMetadataProvider unit tests
+CXX = g++
+CXXFLAGS = -std=c++17 -Wall -g -I../../gst-libs/gst/pylon $(shell pkg-config --cflags gstreamer-1.0 glib-2.0)
+LDFLAGS = $(shell pkg-config --libs gstreamer-1.0 glib-2.0) -pthread
+
+SRCDIR = ../../gst-libs/gst/pylon
+SOURCES = $(SRCDIR)/gsthdrmetadataprovider.cpp test_hdr_metadata_simple.cpp
+OBJECTS = gsthdrmetadataprovider.o test_hdr_metadata_simple.o
+TARGET = test_hdr_metadata
+
+.PHONY: all clean test
+
+all: $(TARGET)
+
+$(TARGET): $(OBJECTS)
+	$(CXX) $(OBJECTS) -o $(TARGET) $(LDFLAGS)
+
+gsthdrmetadataprovider.o: $(SRCDIR)/gsthdrmetadataprovider.cpp
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+test_hdr_metadata_simple.o: test_hdr_metadata_simple.cpp
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+test: $(TARGET)
+	./$(TARGET)
+
+clean:
+	rm -f $(OBJECTS) $(TARGET)

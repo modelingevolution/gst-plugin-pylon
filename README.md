@@ -352,7 +352,8 @@ The implementation dynamically configures sequencer sets based on sequence lengt
 - Switch to Profile 0: Set `hdr-profile=0` (triggers SoftwareSignal2 after completing current profile's window)
 - Frame-synchronized switching ensures no dropped frames
 - Switching occurs after completing all exposures in the current profile's window
-- Software signal is automatically retried for up to 5 frames to ensure reliable switching
+- Software signal is automatically retried for the maximum window size of both profiles to ensure reliable switching
+- ExposureTime chunk is automatically enabled to provide metadata for each frame's exposure
 
 **Requirements:**
 - Camera must support sequencer mode features
@@ -365,6 +366,57 @@ The implementation dynamically configures sequencer sets based on sequence lengt
 - Some cameras may support more than 16 sequencer sets, but 16 is used as a safe default
 - Software signals (SoftwareSignal1/2) must be available in the camera
 - ExposureActive trigger must be supported for sequencer operation
+
+#### HDR Metadata
+
+When HDR sequencer mode is active, the plugin attaches HDR-specific metadata to each buffer to enable proper downstream processing. This metadata provides complete information about each frame's position within the HDR sequence.
+
+**HDR Metadata Structure:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `MasterSequence` | `guint64` | Monotonically increasing counter for complete HDR windows. Increments each time a full HDR sequence completes or when profile switching is detected. |
+| `ExposureSequenceIndex` | `guint8` | Zero-based index of the current exposure within the active HDR sequence (0 to ExposureCount-1). |
+| `ExposureCount` | `guint8` | Total number of exposures in the active HDR sequence. |
+| `ExposureValue` | `guint32` | Actual exposure time in microseconds for the current frame. |
+| `HdrProfile` | `guint8` | Currently active HDR profile (0 or 1). |
+
+**MasterSequence Behavior:**
+- Formula: `floor(FrameNumber / ExposureCount) + offset`
+- Offset is calculated on profile switches to maintain continuity
+- When switching profiles: `offset = (previousMasterSequence + 1) - newProfile.GetMasterSequence(frameNumber)`
+- This ensures the master sequence increments by 1 when switching profiles
+- Allows downstream elements to group frames from the same HDR capture window
+
+**Profile Detection:**
+- The plugin maintains a mapping of exposure values to profiles
+- If duplicate exposure values exist across profiles, they are internally adjusted (+1μs) to ensure uniqueness
+- Profile detection is based on actual exposure time from chunk metadata, not the requested profile
+- This handles the delay between profile switch request and actual camera response
+
+**Example Metadata Sequence:**
+
+For `hdr-sequence="19,150"` and `hdr-sequence2="250,350,450"`:
+
+| Frame | MasterSeq | ExpIndex | ExpCount | ExpValue | Profile | Notes |
+|-------|-----------|----------|----------|----------|---------|-------|
+| 0 | 0 | 0 | 2 | 19 | 0 | Profile 0 start |
+| 1 | 0 | 1 | 2 | 150 | 0 | |
+| 2 | 1 | 0 | 2 | 19 | 0 | New window |
+| 3 | 1 | 1 | 2 | 150 | 0 | |
+| | | | | | | *Switch requested* |
+| 4 | 2 | 0 | 3 | 250 | 1 | Profile 1 active |
+| 5 | 2 | 1 | 3 | 350 | 1 | |
+| 6 | 2 | 2 | 3 | 450 | 1 | |
+| 7 | 3 | 0 | 3 | 250 | 1 | New window |
+
+**Usage in Downstream Elements:**
+
+Downstream elements can access this metadata to:
+- Combine frames with the same `MasterSequence` for HDR processing
+- Track profile transitions using the `HdrProfile` field
+- Identify frame position within HDR sequence using `ExposureSequenceIndex`
+- Validate complete HDR windows using `ExposureCount`
 
 ### Chunks and Capture metadata
 
@@ -384,6 +436,8 @@ The pylon image meta data ( pylon GrabResult ) is appended per default. The valu
 **Exposure Time in Metadata**
 
 When ExposureTime chunk is enabled, the actual exposure time used for each frame is included in the buffer metadata. This is particularly useful for HDR sequences where each frame may have a different exposure time.
+
+**Note:** When HDR sequences are configured (`hdr-sequence` property is set), the plugin automatically enables `ChunkModeActive` and `ChunkEnable-ExposureTime` to provide exposure metadata for each frame. This allows applications to track which exposure value was used for each captured frame without manually enabling chunks.
 
 **Example**
 

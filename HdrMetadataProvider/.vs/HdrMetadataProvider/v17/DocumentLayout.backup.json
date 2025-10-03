@@ -1,0 +1,189 @@
+{
+  "Version": 1,
+  "WorkspaceRootPath": "D:\\source\\gst-plugin-pylon\\HdrMetadataProvider\\",
+  "Documents": [
+    {
+      "AbsoluteMoniker": "D:0:0:{3DD30079-0447-06D2-1985-BE3D8BBD2643}|HdrMetadataProvider.csproj|d:\\source\\gst-plugin-pylon\\hdrmetadataprovider\\hdrmetadataproviderimpl.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{3DD30079-0447-06D2-1985-BE3D8BBD2643}|HdrMetadataProvider.csproj|solutionrelative:hdrmetadataproviderimpl.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{3DD30079-0447-06D2-1985-BE3D8BBD2643}|HdrMetadataProvider.csproj|d:\\source\\gst-plugin-pylon\\hdrmetadataprovider\\hdrmetadata.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{3DD30079-0447-06D2-1985-BE3D8BBD2643}|HdrMetadataProvider.csproj|solutionrelative:hdrmetadata.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{3DD30079-0447-06D2-1985-BE3D8BBD2643}|HdrMetadataProvider.csproj|d:\\source\\gst-plugin-pylon\\hdrmetadataprovider\\ihdrmetadataprovider.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{3DD30079-0447-06D2-1985-BE3D8BBD2643}|HdrMetadataProvider.csproj|solutionrelative:ihdrmetadataprovider.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{3DD30079-0447-06D2-1985-BE3D8BBD2643}|HdrMetadataProvider.csproj|d:\\source\\gst-plugin-pylon\\hdrmetadataprovider\\hdrmetadataprovidergaptests.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{3DD30079-0447-06D2-1985-BE3D8BBD2643}|HdrMetadataProvider.csproj|solutionrelative:hdrmetadataprovidergaptests.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{3DD30079-0447-06D2-1985-BE3D8BBD2643}|HdrMetadataProvider.csproj|d:\\source\\gst-plugin-pylon\\hdrmetadataprovider\\hdrmetadataprovidermidcycletests.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{3DD30079-0447-06D2-1985-BE3D8BBD2643}|HdrMetadataProvider.csproj|solutionrelative:hdrmetadataprovidermidcycletests.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{3DD30079-0447-06D2-1985-BE3D8BBD2643}|HdrMetadataProvider.csproj|d:\\source\\gst-plugin-pylon\\hdrmetadataprovider\\hdrmetadataprovideradjustmenttests.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{3DD30079-0447-06D2-1985-BE3D8BBD2643}|HdrMetadataProvider.csproj|solutionrelative:hdrmetadataprovideradjustmenttests.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{3DD30079-0447-06D2-1985-BE3D8BBD2643}|HdrMetadataProvider.csproj|d:\\source\\gst-plugin-pylon\\hdrmetadataprovider\\hdrmetadata.cs.bak||{8B382828-6202-11D1-8870-0000F87579D2}",
+      "RelativeMoniker": "D:0:0:{3DD30079-0447-06D2-1985-BE3D8BBD2643}|HdrMetadataProvider.csproj|solutionrelative:hdrmetadata.cs.bak||{8B382828-6202-11D1-8870-0000F87579D2}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{3DD30079-0447-06D2-1985-BE3D8BBD2643}|HdrMetadataProvider.csproj|d:\\source\\gst-plugin-pylon\\hdrmetadataprovider\\hdrmetadataproviderwindowsizetests.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{3DD30079-0447-06D2-1985-BE3D8BBD2643}|HdrMetadataProvider.csproj|solutionrelative:hdrmetadataproviderwindowsizetests.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{3DD30079-0447-06D2-1985-BE3D8BBD2643}|HdrMetadataProvider.csproj|d:\\source\\gst-plugin-pylon\\hdrmetadataprovider\\hdrmetadataproviderextensivetests.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{3DD30079-0447-06D2-1985-BE3D8BBD2643}|HdrMetadataProvider.csproj|solutionrelative:hdrmetadataproviderextensivetests.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    }
+  ],
+  "DocumentGroupContainers": [
+    {
+      "Orientation": 0,
+      "VerticalTabListWidth": 256,
+      "DocumentGroups": [
+        {
+          "DockedWidth": 263,
+          "SelectedChildIndex": 11,
+          "Children": [
+            {
+              "$type": "Bookmark",
+              "Name": "ST:129:0:{1fc202d4-d401-403c-9834-5b218574bb67}"
+            },
+            {
+              "$type": "Bookmark",
+              "Name": "ST:0:0:{37aba9be-445a-11d3-9949-00c04f68fd0a}"
+            },
+            {
+              "$type": "Bookmark",
+              "Name": "ST:0:0:{aa2115a1-9712-457b-9047-dbb71ca2cdd2}"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 2,
+              "Title": "IHdrMetadataProvider.cs",
+              "DocumentMoniker": "D:\\source\\gst-plugin-pylon\\HdrMetadataProvider\\IHdrMetadataProvider.cs",
+              "RelativeDocumentMoniker": "IHdrMetadataProvider.cs",
+              "ToolTip": "D:\\source\\gst-plugin-pylon\\HdrMetadataProvider\\IHdrMetadataProvider.cs",
+              "RelativeToolTip": "IHdrMetadataProvider.cs",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAA0AAAAuAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2025-09-24T13:28:52.04Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 6,
+              "Title": "HdrMetadata.cs.bak",
+              "DocumentMoniker": "D:\\source\\gst-plugin-pylon\\HdrMetadataProvider\\HdrMetadata.cs.bak",
+              "RelativeDocumentMoniker": "HdrMetadata.cs.bak",
+              "ToolTip": "D:\\source\\gst-plugin-pylon\\HdrMetadataProvider\\HdrMetadata.cs.bak",
+              "RelativeToolTip": "HdrMetadata.cs.bak",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAABAAAAA0AAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001001|",
+              "WhenOpened": "2025-09-24T12:23:59.459Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Bookmark",
+              "Name": "ST:0:0:{d84ee353-0bef-5a41-a649-8f89aca5d84d}"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 3,
+              "Title": "HdrMetadataProviderGapTests.cs",
+              "DocumentMoniker": "D:\\source\\gst-plugin-pylon\\HdrMetadataProvider\\HdrMetadataProviderGapTests.cs",
+              "RelativeDocumentMoniker": "HdrMetadataProviderGapTests.cs",
+              "ToolTip": "D:\\source\\gst-plugin-pylon\\HdrMetadataProvider\\HdrMetadataProviderGapTests.cs",
+              "RelativeToolTip": "HdrMetadataProviderGapTests.cs",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAABsAAAAjAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2025-09-24T12:03:03.041Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 5,
+              "Title": "HdrMetadataProviderAdjustmentTests.cs",
+              "DocumentMoniker": "D:\\source\\gst-plugin-pylon\\HdrMetadataProvider\\HdrMetadataProviderAdjustmentTests.cs",
+              "RelativeDocumentMoniker": "HdrMetadataProviderAdjustmentTests.cs",
+              "ToolTip": "D:\\source\\gst-plugin-pylon\\HdrMetadataProvider\\HdrMetadataProviderAdjustmentTests.cs",
+              "RelativeToolTip": "HdrMetadataProviderAdjustmentTests.cs",
+              "ViewState": "AgIAACAAAAAAAAAAAAAkwC8AAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2025-09-24T12:00:17.815Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 4,
+              "Title": "HdrMetadataProviderMidCycleTests.cs",
+              "DocumentMoniker": "D:\\source\\gst-plugin-pylon\\HdrMetadataProvider\\HdrMetadataProviderMidCycleTests.cs",
+              "RelativeDocumentMoniker": "HdrMetadataProviderMidCycleTests.cs",
+              "ToolTip": "D:\\source\\gst-plugin-pylon\\HdrMetadataProvider\\HdrMetadataProviderMidCycleTests.cs",
+              "RelativeToolTip": "HdrMetadataProviderMidCycleTests.cs",
+              "ViewState": "AgIAABYAAAAAAAAAAAAgwCwAAAAzAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2025-09-23T18:34:00.414Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 8,
+              "Title": "HdrMetadataProviderExtensiveTests.cs",
+              "DocumentMoniker": "D:\\source\\gst-plugin-pylon\\HdrMetadataProvider\\HdrMetadataProviderExtensiveTests.cs",
+              "RelativeDocumentMoniker": "HdrMetadataProviderExtensiveTests.cs",
+              "ToolTip": "D:\\source\\gst-plugin-pylon\\HdrMetadataProvider\\HdrMetadataProviderExtensiveTests.cs",
+              "RelativeToolTip": "HdrMetadataProviderExtensiveTests.cs",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAawCsBAAABAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2025-09-23T18:26:32.276Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 7,
+              "Title": "HdrMetadataProviderWindowSizeTests.cs",
+              "DocumentMoniker": "D:\\source\\gst-plugin-pylon\\HdrMetadataProvider\\HdrMetadataProviderWindowSizeTests.cs",
+              "RelativeDocumentMoniker": "HdrMetadataProviderWindowSizeTests.cs",
+              "ToolTip": "D:\\source\\gst-plugin-pylon\\HdrMetadataProvider\\HdrMetadataProviderWindowSizeTests.cs",
+              "RelativeToolTip": "HdrMetadataProviderWindowSizeTests.cs",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAEwFkBAAABAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2025-09-23T14:58:54.873Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 0,
+              "Title": "HdrMetadataProviderImpl.cs",
+              "DocumentMoniker": "D:\\source\\gst-plugin-pylon\\HdrMetadataProvider\\HdrMetadataProviderImpl.cs",
+              "RelativeDocumentMoniker": "HdrMetadataProviderImpl.cs",
+              "ToolTip": "D:\\source\\gst-plugin-pylon\\HdrMetadataProvider\\HdrMetadataProviderImpl.cs",
+              "RelativeToolTip": "HdrMetadataProviderImpl.cs",
+              "ViewState": "AgIAAB8AAAAAAAAAAAAnwBEAAAAJAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2025-09-22T17:07:44.509Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 1,
+              "Title": "HdrMetadata.cs",
+              "DocumentMoniker": "D:\\source\\gst-plugin-pylon\\HdrMetadataProvider\\HdrMetadata.cs",
+              "RelativeDocumentMoniker": "HdrMetadata.cs",
+              "ToolTip": "D:\\source\\gst-plugin-pylon\\HdrMetadataProvider\\HdrMetadata.cs",
+              "RelativeToolTip": "HdrMetadata.cs",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAB0AAAAeAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2025-09-22T17:05:40.611Z",
+              "EditorCaption": ""
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
