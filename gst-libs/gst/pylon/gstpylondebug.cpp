@@ -39,10 +39,10 @@
 GST_DEBUG_CATEGORY(gst_pylon_debug);
 
 void gst_pylon_debug_init(void) {
-  if (g_once_init_enter(&gst_pylon_debug)) {
-    GST_DEBUG_CATEGORY(cat_done);
-    GST_DEBUG_CATEGORY_INIT(cat_done, "pylonsrc", 0,
+  static gsize init_once = 0;
+  if (g_once_init_enter(&init_once)) {
+    GST_DEBUG_CATEGORY_INIT(gst_pylon_debug, "pylonsrc", 0,
                             "debug category for pylonsrc element");
-    g_once_init_leave(&gst_pylon_debug, cat_done);
+    g_once_init_leave(&init_once, 1);
   }
 }
