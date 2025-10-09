@@ -916,49 +916,39 @@ gboolean gst_pylon_configure_dual_hdr_sequence(GstPylon *self,
 
       configureCommonSettings(set_num, exposure);
 
-      if (i == profile0_last) {
-        // Last set of Profile 0 - add branching
-
-        // Path 0: Switch to Profile 1 on SoftwareSignal1 (checked first)
-        pathSelector.SetValue(0);
-        setNext.SetValue(profile1_first);
-        if (seqTriggerSource.IsValid()) {
-          if (seqTriggerSource.CanSetValue("SoftwareSignal1")) {
-            seqTriggerSource.SetValue("SoftwareSignal1");
-            GST_INFO("  Path 0: Next = %d, Trigger = SoftwareSignal1 (switch to Profile 1)", profile1_first);
-          } else {
-            GST_WARNING("  Path 0: Cannot set trigger to SoftwareSignal1");
-          }
+      // ALL sets in Profile 0 get software signal on Path 0
+      // Path 0: Switch to Profile 1 on SoftwareSignal1 (checked first)
+      pathSelector.SetValue(0);
+      setNext.SetValue(profile1_first);
+      if (seqTriggerSource.IsValid()) {
+        if (seqTriggerSource.CanSetValue("SoftwareSignal1")) {
+          seqTriggerSource.SetValue("SoftwareSignal1");
+          GST_INFO("  Path 0: Next = %d, Trigger = SoftwareSignal1 (switch to Profile 1)", profile1_first);
+        } else {
+          GST_WARNING("  Path 0: Cannot set trigger to SoftwareSignal1");
         }
-        saveSet();
-
-        // Path 1: Default path - continue in Profile 0 with ExposureActive trigger
-        pathSelector.SetValue(1);
-        setNext.SetValue(profile0_first);
-        if (seqTriggerSource.IsValid()) {
-          if (seqTriggerSource.CanSetValue(HDR_SEQUENCER_TRIGGER)) {
-            seqTriggerSource.SetValue(HDR_SEQUENCER_TRIGGER);
-            GST_INFO("  Path 1 (default): Next = %d, Trigger = %s (loop Profile 0)", profile0_first, HDR_SEQUENCER_TRIGGER);
-          } else {
-            GST_WARNING("  Path 1: Cannot set trigger to %s", HDR_SEQUENCER_TRIGGER);
-          }
-        }
-        saveSet();
-
-      } else {
-        // Non-branching set - single path to next set
-        pathSelector.SetValue(0);
-        setNext.SetValue(set_num + 1);
-        if (seqTriggerSource.IsValid()) {
-          if (seqTriggerSource.CanSetValue(HDR_SEQUENCER_TRIGGER)) {
-            seqTriggerSource.SetValue(HDR_SEQUENCER_TRIGGER);
-            GST_INFO("  Path 0: Next = %d, Trigger = %s", set_num + 1, HDR_SEQUENCER_TRIGGER);
-          } else {
-            GST_WARNING("  Path 0: Cannot set trigger to %s", HDR_SEQUENCER_TRIGGER);
-          }
-        }
-        saveSet();
       }
+      saveSet();
+
+      // Path 1: Default path - normal progression with ExposureActive trigger
+      pathSelector.SetValue(1);
+      if (i == profile0_last) {
+        // Last set: loop back to beginning
+        setNext.SetValue(profile0_first);
+        GST_INFO("  Path 1 (default): Next = %d, Trigger = %s (loop Profile 0)", profile0_first, HDR_SEQUENCER_TRIGGER);
+      } else {
+        // Other sets: go to next set
+        setNext.SetValue(set_num + 1);
+        GST_INFO("  Path 1 (default): Next = %d, Trigger = %s", set_num + 1, HDR_SEQUENCER_TRIGGER);
+      }
+      if (seqTriggerSource.IsValid()) {
+        if (seqTriggerSource.CanSetValue(HDR_SEQUENCER_TRIGGER)) {
+          seqTriggerSource.SetValue(HDR_SEQUENCER_TRIGGER);
+        } else {
+          GST_WARNING("  Path 1: Cannot set trigger to %s", HDR_SEQUENCER_TRIGGER);
+        }
+      }
+      saveSet();
     }
 
     // ===== Configure Profile 1 sets =====
@@ -971,49 +961,39 @@ gboolean gst_pylon_configure_dual_hdr_sequence(GstPylon *self,
 
       configureCommonSettings(set_num, exposure);
 
-      if (set_num == profile1_last) {
-        // Last set of Profile 1 - add branching
-
-        // Path 0: Switch back to Profile 0 on SoftwareSignal2 (checked first)
-        pathSelector.SetValue(0);
-        setNext.SetValue(profile0_first);
-        if (seqTriggerSource.IsValid()) {
-          if (seqTriggerSource.CanSetValue("SoftwareSignal2")) {
-            seqTriggerSource.SetValue("SoftwareSignal2");
-            GST_INFO("  Path 0: Next = %d, Trigger = SoftwareSignal2 (switch to Profile 0)", profile0_first);
-          } else {
-            GST_WARNING("  Path 0: Cannot set trigger to SoftwareSignal2");
-          }
+      // ALL sets in Profile 1 get software signal on Path 0
+      // Path 0: Switch to Profile 0 on SoftwareSignal2 (checked first)
+      pathSelector.SetValue(0);
+      setNext.SetValue(profile0_first);
+      if (seqTriggerSource.IsValid()) {
+        if (seqTriggerSource.CanSetValue("SoftwareSignal2")) {
+          seqTriggerSource.SetValue("SoftwareSignal2");
+          GST_INFO("  Path 0: Next = %d, Trigger = SoftwareSignal2 (switch to Profile 0)", profile0_first);
+        } else {
+          GST_WARNING("  Path 0: Cannot set trigger to SoftwareSignal2");
         }
-        saveSet();
-
-        // Path 1: Default path - continue in Profile 1 with ExposureActive trigger
-        pathSelector.SetValue(1);
-        setNext.SetValue(profile1_first);
-        if (seqTriggerSource.IsValid()) {
-          if (seqTriggerSource.CanSetValue(HDR_SEQUENCER_TRIGGER)) {
-            seqTriggerSource.SetValue(HDR_SEQUENCER_TRIGGER);
-            GST_INFO("  Path 1 (default): Next = %d, Trigger = %s (loop Profile 1)", profile1_first, HDR_SEQUENCER_TRIGGER);
-          } else {
-            GST_WARNING("  Path 1: Cannot set trigger to %s", HDR_SEQUENCER_TRIGGER);
-          }
-        }
-        saveSet();
-
-      } else {
-        // Non-branching set - single path to next set
-        pathSelector.SetValue(0);
-        setNext.SetValue(set_num + 1);
-        if (seqTriggerSource.IsValid()) {
-          if (seqTriggerSource.CanSetValue(HDR_SEQUENCER_TRIGGER)) {
-            seqTriggerSource.SetValue(HDR_SEQUENCER_TRIGGER);
-            GST_INFO("  Path 0: Next = %d, Trigger = %s", set_num + 1, HDR_SEQUENCER_TRIGGER);
-          } else {
-            GST_WARNING("  Path 0: Cannot set trigger to %s", HDR_SEQUENCER_TRIGGER);
-          }
-        }
-        saveSet();
       }
+      saveSet();
+
+      // Path 1: Default path - normal progression with ExposureActive trigger
+      pathSelector.SetValue(1);
+      if (set_num == profile1_last) {
+        // Last set: loop back to beginning
+        setNext.SetValue(profile1_first);
+        GST_INFO("  Path 1 (default): Next = %d, Trigger = %s (loop Profile 1)", profile1_first, HDR_SEQUENCER_TRIGGER);
+      } else {
+        // Other sets: go to next set
+        setNext.SetValue(set_num + 1);
+        GST_INFO("  Path 1 (default): Next = %d, Trigger = %s", set_num + 1, HDR_SEQUENCER_TRIGGER);
+      }
+      if (seqTriggerSource.IsValid()) {
+        if (seqTriggerSource.CanSetValue(HDR_SEQUENCER_TRIGGER)) {
+          seqTriggerSource.SetValue(HDR_SEQUENCER_TRIGGER);
+        } else {
+          GST_WARNING("  Path 1: Cannot set trigger to %s", HDR_SEQUENCER_TRIGGER);
+        }
+      }
+      saveSet();
     }
 
     // Exit configuration mode

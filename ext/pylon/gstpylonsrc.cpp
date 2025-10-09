@@ -516,8 +516,8 @@ static void gst_pylon_src_set_property(GObject *object, guint property_id,
         gint new_profile = g_value_get_int(value);
         if (new_profile >= 0 && new_profile <= 1) {
           if (self->hdr_plugin && self->hdr_plugin->IsConfigured()) {
-            gint retry_count = 3 * MAX(self->hdr_plugin->GetProfileWindowSize(0),
-                                       self->hdr_plugin->GetProfileWindowSize(1));
+            // With software signals on all states, only need 1 retry
+            gint retry_count = 1;
             self->hdr_switcher->RequestSwitch(new_profile, retry_count);
             GST_INFO_OBJECT(self, "Profile switch requested to %d, will retry %d times",
                            new_profile, retry_count);
