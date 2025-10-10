@@ -312,39 +312,48 @@ gst-launch-1.0 pylonsrc hdr-sequence="10,30,90" hdr-sequence2="100,200" hdr-prof
 gst-launch-1.0 pylonsrc hdr-sequence="50" hdr-sequence2="200" hdr-profile=0 ! videoconvert ! autovideosink
 ```
 
-**Sequencer Configuration with Path Branching:**
+**Sequencer Configuration with Dual-Path Architecture:**
 
-The implementation dynamically configures sequencer sets based on sequence lengths. Only the last set of each profile has branching paths:
+The implementation uses a dual-path configuration for ALL sequencer sets (not just the last set). This ensures profile switching can occur at any point in the sequence while maintaining normal progression as the default behavior.
 
 **Example for 2-exposure Profile 0 and 2-exposure Profile 1:**
 
 | Set # | Exposure | Path | Next Set | Trigger Source | Description |
 |-------|----------|------|----------|----------------|-------------|
-| **Set 0** | 19μs | 0 | 1 | ExposureActive | Profile 0, frame 1 |
+| **Set 0** | 19μs | 0 | 2 | SoftwareSignal1 | Jump to Profile 1 (priority) |
+| | | 1 | 1 | ExposureActive | Continue to Set 1 (default) |
 | **Set 1** | 150μs | 0 | 2 | SoftwareSignal1 | Jump to Profile 1 (priority) |
-| | | 1 | 0 | ExposureActive | Continue Profile 0 (default) |
-| **Set 2** | 250μs | 0 | 3 | ExposureActive | Profile 1, frame 1 |
+| | | 1 | 0 | ExposureActive | Loop back to Set 0 (default) |
+| **Set 2** | 250μs | 0 | 0 | SoftwareSignal2 | Jump to Profile 0 (priority) |
+| | | 1 | 3 | ExposureActive | Continue to Set 3 (default) |
 | **Set 3** | 350μs | 0 | 0 | SoftwareSignal2 | Jump to Profile 0 (priority) |
-| | | 1 | 2 | ExposureActive | Continue Profile 1 (default) |
+| | | 1 | 2 | ExposureActive | Loop back to Set 2 (default) |
 
 **Example for 3-exposure Profile 0 and 2-exposure Profile 1:**
 
 | Set # | Exposure | Path | Next Set | Trigger Source | Description |
 |-------|----------|------|----------|----------------|-------------|
-| **Set 0** | 10μs | 0 | 1 | ExposureActive | Profile 0, frame 1 |
-| **Set 1** | 30μs | 0 | 2 | ExposureActive | Profile 0, frame 2 |
+| **Set 0** | 10μs | 0 | 3 | SoftwareSignal1 | Jump to Profile 1 (priority) |
+| | | 1 | 1 | ExposureActive | Continue to Set 1 (default) |
+| **Set 1** | 30μs | 0 | 3 | SoftwareSignal1 | Jump to Profile 1 (priority) |
+| | | 1 | 2 | ExposureActive | Continue to Set 2 (default) |
 | **Set 2** | 90μs | 0 | 3 | SoftwareSignal1 | Jump to Profile 1 (priority) |
-| | | 1 | 0 | ExposureActive | Continue Profile 0 (default) |
-| **Set 3** | 100μs | 0 | 4 | ExposureActive | Profile 1, frame 1 |
+| | | 1 | 0 | ExposureActive | Loop back to Set 0 (default) |
+| **Set 3** | 100μs | 0 | 0 | SoftwareSignal2 | Jump to Profile 0 (priority) |
+| | | 1 | 4 | ExposureActive | Continue to Set 4 (default) |
 | **Set 4** | 200μs | 0 | 0 | SoftwareSignal2 | Jump to Profile 0 (priority) |
-| | | 1 | 3 | ExposureActive | Continue Profile 1 (default) |
+| | | 1 | 3 | ExposureActive | Loop back to Set 3 (default) |
 
-**Path Branching Details:**
-- Only the **last set** of each profile has branching paths using `SequencerPathSelector`
+**Dual-Path Architecture Details:**
+- **ALL sequencer sets** have dual-path configuration using `SequencerPathSelector`
 - Path 0 (checked first): Software signal trigger - takes priority when signal is active
+  - Profile 0 sets: Use SoftwareSignal1 to jump to first set of Profile 1
+  - Profile 1 sets: Use SoftwareSignal2 to jump to first set of Profile 0
 - Path 1 (fallback): ExposureActive trigger - always fires after exposure completes
-- This ensures profile switching is checked first, with automatic fallback to continue current profile
-- All non-branching sets use a single path with ExposureActive trigger
+  - Provides normal progression through the sequence
+  - Last set of each profile loops back to first set of same profile
+- This ensures profile switching is checked first at every frame, with automatic fallback to continue current profile
+- Configuration is saved ONCE per set after both paths are completely configured (fixes critical bug where second path overwrote first)
 
 **Runtime behavior:**
 - Starts with Profile 0 by default

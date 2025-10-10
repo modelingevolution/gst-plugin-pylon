@@ -1,6 +1,34 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+### Fixed
+- Fixed critical dual-path sequencer configuration bug in HDR mode
+  * Previously, `saveSet()` was called twice per sequencer set - once after Path 0 configuration and once after Path 1 configuration
+  * The second call overwrote the first path configuration, resulting in only Path 1 being saved
+  * Now both paths are configured completely before calling `saveSet()` once
+  * Applies to both Profile 0 and Profile 1 configuration loops
+  * See gstpylon.cpp:909-958 (Profile 0) and gstpylon.cpp:960-1009 (Profile 1)
+- Implemented fail-fast error handling for critical sequencer operations
+  * Replaced `GST_WARNING()` calls with `throw Pylon::GenericException()` for critical failures
+  * Ensures proper validation of `SequencerTriggerSource` parameter availability
+  * Validates that software signals (SoftwareSignal1/2) can be set before attempting configuration
+  * Validates that HDR_SEQUENCER_TRIGGER can be set for ExposureActive path
+  * Properly frees memory with `g_strfreev()` before throwing exceptions
+
+### Changed
+- Updated HDR dual-path sequencer configuration (gstpylon.cpp:909-1009)
+  * ALL sequencer sets now have dual-path configuration (not just the last set of each profile)
+  * Path 0: Software signal for profile switching - checked first, takes priority when signal is active
+    - Profile 0 sets use SoftwareSignal1 to jump to Profile 1
+    - Profile 1 sets use SoftwareSignal2 to jump to Profile 0
+  * Path 1: ExposureActive trigger for normal progression - fallback path, always fires after exposure
+  * This ensures profile switching is checked first with automatic fallback to continue current profile
+  * Frame-synchronized switching with no dropped frames
+- Changed exposure time logging level from INFO to DEBUG (gstpylon.cpp:1318-1335)
+  * Reduces console noise during normal operation
+  * Debug logs still available via GST_DEBUG=pylonsrc:5
+
 ## [1.0.0] - 2024-08-14
 ## Added
 - added script to generate release notes
