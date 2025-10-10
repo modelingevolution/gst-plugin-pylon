@@ -40,6 +40,12 @@
 #include <pylon/PylonVersionNumber.h>
 
 static gboolean plugin_init(GstPlugin* plugin) {
+  GST_INFO("gst-plugin-pylon version: v2.0.20");
+  GST_INFO("Pylon SDK version: %s.%s.%s (build %s)",
+           PYLON_VERSIONSTRING_MAJOR,
+           PYLON_VERSIONSTRING_MINOR,
+           PYLON_VERSIONSTRING_SUBMINOR,
+           PYLON_VERSIONSTRING_BUILD);
   return gst_element_register(plugin, "pylonsrc", GST_RANK_NONE,
                               GST_TYPE_PYLON_SRC);
 }

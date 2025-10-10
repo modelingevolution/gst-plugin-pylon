@@ -920,15 +920,18 @@ gboolean gst_pylon_configure_dual_hdr_sequence(GstPylon *self,
       // Path 0: Switch to Profile 1 on SoftwareSignal1 (checked first)
       pathSelector.SetValue(0);
       setNext.SetValue(profile1_first);
-      if (seqTriggerSource.IsValid()) {
-        if (seqTriggerSource.CanSetValue("SoftwareSignal1")) {
-          seqTriggerSource.SetValue("SoftwareSignal1");
-          GST_INFO("  Path 0: Next = %d, Trigger = SoftwareSignal1 (switch to Profile 1)", profile1_first);
-        } else {
-          GST_WARNING("  Path 0: Cannot set trigger to SoftwareSignal1");
-        }
+      if (!seqTriggerSource.IsValid()) {
+        g_strfreev(exposures1);
+        g_strfreev(exposures2);
+        throw Pylon::GenericException("SequencerTriggerSource parameter not available", __FILE__, __LINE__);
       }
-      saveSet();
+      if (!seqTriggerSource.CanSetValue("SoftwareSignal1")) {
+        g_strfreev(exposures1);
+        g_strfreev(exposures2);
+        throw Pylon::GenericException("Cannot set SequencerTriggerSource to SoftwareSignal1", __FILE__, __LINE__);
+      }
+      seqTriggerSource.SetValue("SoftwareSignal1");
+      GST_INFO("  Path 0: Next = %d, Trigger = SoftwareSignal1 (switch to Profile 1)", profile1_first);
 
       // Path 1: Default path - normal progression with ExposureActive trigger
       pathSelector.SetValue(1);
@@ -941,13 +944,16 @@ gboolean gst_pylon_configure_dual_hdr_sequence(GstPylon *self,
         setNext.SetValue(set_num + 1);
         GST_INFO("  Path 1 (default): Next = %d, Trigger = %s", set_num + 1, HDR_SEQUENCER_TRIGGER);
       }
-      if (seqTriggerSource.IsValid()) {
-        if (seqTriggerSource.CanSetValue(HDR_SEQUENCER_TRIGGER)) {
-          seqTriggerSource.SetValue(HDR_SEQUENCER_TRIGGER);
-        } else {
-          GST_WARNING("  Path 1: Cannot set trigger to %s", HDR_SEQUENCER_TRIGGER);
-        }
+      if (!seqTriggerSource.CanSetValue(HDR_SEQUENCER_TRIGGER)) {
+        g_strfreev(exposures1);
+        g_strfreev(exposures2);
+        throw Pylon::GenericException(
+          (std::string("Cannot set SequencerTriggerSource to ") + HDR_SEQUENCER_TRIGGER).c_str(),
+          __FILE__, __LINE__);
       }
+      seqTriggerSource.SetValue(HDR_SEQUENCER_TRIGGER);
+
+      // Save the set ONCE with BOTH paths configured
       saveSet();
     }
 
@@ -965,15 +971,18 @@ gboolean gst_pylon_configure_dual_hdr_sequence(GstPylon *self,
       // Path 0: Switch to Profile 0 on SoftwareSignal2 (checked first)
       pathSelector.SetValue(0);
       setNext.SetValue(profile0_first);
-      if (seqTriggerSource.IsValid()) {
-        if (seqTriggerSource.CanSetValue("SoftwareSignal2")) {
-          seqTriggerSource.SetValue("SoftwareSignal2");
-          GST_INFO("  Path 0: Next = %d, Trigger = SoftwareSignal2 (switch to Profile 0)", profile0_first);
-        } else {
-          GST_WARNING("  Path 0: Cannot set trigger to SoftwareSignal2");
-        }
+      if (!seqTriggerSource.IsValid()) {
+        g_strfreev(exposures1);
+        g_strfreev(exposures2);
+        throw Pylon::GenericException("SequencerTriggerSource parameter not available", __FILE__, __LINE__);
       }
-      saveSet();
+      if (!seqTriggerSource.CanSetValue("SoftwareSignal2")) {
+        g_strfreev(exposures1);
+        g_strfreev(exposures2);
+        throw Pylon::GenericException("Cannot set SequencerTriggerSource to SoftwareSignal2", __FILE__, __LINE__);
+      }
+      seqTriggerSource.SetValue("SoftwareSignal2");
+      GST_INFO("  Path 0: Next = %d, Trigger = SoftwareSignal2 (switch to Profile 0)", profile0_first);
 
       // Path 1: Default path - normal progression with ExposureActive trigger
       pathSelector.SetValue(1);
@@ -986,13 +995,16 @@ gboolean gst_pylon_configure_dual_hdr_sequence(GstPylon *self,
         setNext.SetValue(set_num + 1);
         GST_INFO("  Path 1 (default): Next = %d, Trigger = %s", set_num + 1, HDR_SEQUENCER_TRIGGER);
       }
-      if (seqTriggerSource.IsValid()) {
-        if (seqTriggerSource.CanSetValue(HDR_SEQUENCER_TRIGGER)) {
-          seqTriggerSource.SetValue(HDR_SEQUENCER_TRIGGER);
-        } else {
-          GST_WARNING("  Path 1: Cannot set trigger to %s", HDR_SEQUENCER_TRIGGER);
-        }
+      if (!seqTriggerSource.CanSetValue(HDR_SEQUENCER_TRIGGER)) {
+        g_strfreev(exposures1);
+        g_strfreev(exposures2);
+        throw Pylon::GenericException(
+          (std::string("Cannot set SequencerTriggerSource to ") + HDR_SEQUENCER_TRIGGER).c_str(),
+          __FILE__, __LINE__);
       }
+      seqTriggerSource.SetValue(HDR_SEQUENCER_TRIGGER);
+
+      // Save the set ONCE with BOTH paths configured
       saveSet();
     }
 
@@ -1305,8 +1317,7 @@ gboolean gst_pylon_capture(GstPylon *self, GstBuffer **buf,
         // Now try to get the exposure time chunk
         if ((*grab_result_ptr)->ChunkExposureTime.IsValid()) {
           gdouble chunk_exposure = (*grab_result_ptr)->ChunkExposureTime.GetValue();
-          GST_DEBUG("HDR Frame %d - ChunkExposureTime: %.2fμs", frame_counter, chunk_exposure);
-          GST_INFO("Frame %d captured with exposure: %.2fμs (from chunk)",
+          GST_DEBUG("Frame %d captured with exposure: %.2fμs (from chunk)",
                    frame_counter, chunk_exposure);
         } else {
           GST_DEBUG("HDR Frame %d - ChunkExposureTime not valid in grab result", frame_counter);
@@ -1320,8 +1331,7 @@ gboolean gst_pylon_capture(GstPylon *self, GstBuffer **buf,
 
           if (exposureChunk.IsValid()) {
             gdouble chunk_exp = exposureChunk->GetValue();
-            GST_DEBUG("HDR Frame %d - Chunk exposure (alt): %.2fμs", frame_counter, chunk_exp);
-            GST_INFO("Frame %d captured with exposure: %.2fμs (from alt chunk)",
+            GST_DEBUG("Frame %d captured with exposure: %.2fμs (from alt chunk)",
                      frame_counter, chunk_exp);
           } else {
             GST_DEBUG("No exposure time found in chunk data for frame %d", frame_counter);
