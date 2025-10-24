@@ -331,11 +331,13 @@ static void gst_pylon_src_class_init(GstPylonSrcClass *klass) {
       gobject_class, PROP_HDR_SEQUENCE,
       g_param_spec_string(
           "hdr-sequence", "HDR Exposure Sequence (Profile 0)",
-          "Comma-separated list of exposure times in microseconds for HDR sequence mode Profile 0 "
-          "(e.g., '19,150'). Setting this property will automatically configure "
-          "the camera's sequencer mode with the specified exposure values. "
-          "Each exposure value will be assigned to a sequencer set, cycling through "
-          "them continuously. Leave empty to disable sequencer mode.",
+          "Comma-separated list of exposure:gain pairs for HDR sequence mode Profile 0. "
+          "Format: 'exposure1:gain1,exposure2:gain2' where exposure is in microseconds and gain is a float value. "
+          "Gain is optional and defaults to 0 if not specified. "
+          "Examples: '19:1.2,150:2.5' (with gains), '19,150' (gains default to 0), '19:1.2,150' (mixed). "
+          "Setting this property will automatically configure the camera's sequencer mode. "
+          "Each exposure:gain pair will be assigned to a sequencer set, cycling through them continuously. "
+          "Leave empty to disable sequencer mode.",
           PROP_HDR_SEQUENCE_DEFAULT,
           static_cast<GParamFlags>(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
                                    GST_PARAM_MUTABLE_READY)));
@@ -344,9 +346,12 @@ static void gst_pylon_src_class_init(GstPylonSrcClass *klass) {
       gobject_class, PROP_HDR_SEQUENCE2,
       g_param_spec_string(
           "hdr-sequence2", "HDR Exposure Sequence (Profile 1)",
-          "Comma-separated list of exposure times in microseconds for HDR sequence mode Profile 1 "
-          "(e.g., '5000,10000'). When both hdr-sequence and hdr-sequence2 are set, "
-          "dual profile mode is enabled allowing runtime switching between profiles. "
+          "Comma-separated list of exposure:gain pairs for HDR sequence mode Profile 1. "
+          "Format: 'exposure1:gain1,exposure2:gain2' where exposure is in microseconds and gain is a float value. "
+          "Gain is optional and defaults to 0 if not specified. "
+          "Examples: '5000:2.5,10000:3.0' (with gains), '5000,10000' (gains default to 0). "
+          "When both hdr-sequence and hdr-sequence2 are set, dual profile mode is enabled "
+          "allowing runtime switching between profiles via the hdr-profile property. "
           "Leave empty to use single profile mode.",
           PROP_HDR_SEQUENCE2_DEFAULT,
           static_cast<GParamFlags>(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |

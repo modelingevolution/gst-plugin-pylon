@@ -418,28 +418,62 @@ gboolean gst_pylon_configure_hdr_sequence(GstPylon *self, const gchar *hdr_seque
     return TRUE;
   }
 
-  GST_INFO("Configuring HDR sequence with exposures: %s", hdr_sequence);
+  GST_INFO("Configuring HDR sequence: %s", hdr_sequence);
 
   try {
     GenApi::INodeMap &nodemap = self->camera->GetNodeMap();
 
-    // Parse exposure values from comma-separated string
-    gchar **exposures = g_strsplit(hdr_sequence, ",", -1);
-    guint num_exposures = g_strv_length(exposures);
+    // Parse exposure:gain pairs from comma-separated string
+    // Format: "exposure1:gain1,exposure2:gain2" or "exposure1,exposure2" (gain defaults to 0)
+    gchar **steps = g_strsplit(hdr_sequence, ",", -1);
+    guint num_steps = g_strv_length(steps);
 
-    if (num_exposures < 2) {
-      g_strfreev(exposures);
+    if (num_steps < 2) {
+      g_strfreev(steps);
       g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
-                  "HDR sequence requires at least 2 exposure values, got %d", num_exposures);
+                  "HDR sequence requires at least 2 steps, got %d", num_steps);
       return FALSE;
     }
 
-    GST_DEBUG("Configuring sequencer for %d exposure values", num_exposures);
+    // Parse each step into exposure and gain
+    gdouble *exposures = g_new0(gdouble, num_steps);
+    gdouble *gains = g_new0(gdouble, num_steps);
+
+    for (guint i = 0; i < num_steps; i++) {
+      gchar **parts = g_strsplit(steps[i], ":", 2);
+
+      if (parts[0]) {
+        exposures[i] = g_strtod(parts[0], NULL);
+
+        // Parse gain if provided, otherwise default to 0
+        if (parts[1]) {
+          gains[i] = g_strtod(parts[1], NULL);
+        } else {
+          gains[i] = 0.0;
+        }
+
+        GST_DEBUG("Step %d: exposure=%.2f μs, gain=%.2f", i, exposures[i], gains[i]);
+      } else {
+        g_strfreev(parts);
+        g_strfreev(steps);
+        g_free(exposures);
+        g_free(gains);
+        g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
+                    "Failed to parse step %d", i);
+        return FALSE;
+      }
+
+      g_strfreev(parts);
+    }
+
+    GST_DEBUG("Configuring sequencer for %d steps", num_steps);
 
     // Check if sequencer features are available
     Pylon::CEnumParameter sequencerMode(nodemap, "SequencerMode");
     if (!sequencerMode.IsValid()) {
-      g_strfreev(exposures);
+      g_strfreev(steps);
+      g_free(exposures);
+      g_free(gains);
       g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
                   "Camera does not support sequencer mode");
       return FALSE;
@@ -534,22 +568,22 @@ gboolean gst_pylon_configure_hdr_sequence(GstPylon *self, const gchar *hdr_seque
     // Try to get Gain parameter (might be Gain or GainRaw)
     Pylon::CFloatParameter seqGain;
     Pylon::CIntegerParameter seqGainRaw;
-    gdouble gain_val = -1;
-    bool has_gain = false;
+    bool has_gain_float = false;
+    bool has_gain_raw = false;
 
     if (nodemap.GetNode("Gain")) {
       seqGain.Attach(nodemap.GetNode("Gain"));
-      if (seqGain.IsValid() && seqGain.IsReadable()) {
-        gain_val = seqGain.GetValue();
-        has_gain = true;
-        GST_INFO("Current Gain: %.2f", gain_val);
+      if (seqGain.IsValid()) {
+        has_gain_float = true;
+        GST_INFO("Camera supports Gain parameter (float)");
       }
-    } else if (nodemap.GetNode("GainRaw")) {
+    }
+
+    if (!has_gain_float && nodemap.GetNode("GainRaw")) {
       seqGainRaw.Attach(nodemap.GetNode("GainRaw"));
-      if (seqGainRaw.IsValid() && seqGainRaw.IsReadable()) {
-        gain_val = seqGainRaw.GetValue();
-        has_gain = true;
-        GST_INFO("Current GainRaw: %.0f", gain_val);
+      if (seqGainRaw.IsValid()) {
+        has_gain_raw = true;
+        GST_INFO("Camera supports GainRaw parameter (integer)");
       }
     }
 
@@ -563,17 +597,21 @@ gboolean gst_pylon_configure_hdr_sequence(GstPylon *self, const gchar *hdr_seque
     }
 
     if (!exposureTime.IsValid()) {
-      g_strfreev(exposures);
+      g_strfreev(steps);
+      g_free(exposures);
+      g_free(gains);
       g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
                   "Camera does not have ExposureTime parameter");
       return FALSE;
     }
 
-    for (guint i = 0; i < num_exposures; i++) {
-      gdouble exposure = g_strtod(exposures[i], NULL);
-      guint next_set = (i + 1) % num_exposures;  // Loop back to first set
+    for (guint i = 0; i < num_steps; i++) {
+      gdouble exposure = exposures[i];
+      gdouble gain = gains[i];
+      guint next_set = (i + 1) % num_steps;  // Loop back to first set
 
-      GST_DEBUG("Configuring set %d: exposure=%.2f μs, next=%d", i, exposure, next_set);
+      GST_DEBUG("Configuring set %d: exposure=%.2f μs, gain=%.2f, next=%d",
+                i, exposure, gain, next_set);
 
       // Select the set
       if (setSelector.IsValid() && setSelector.IsWritable()) {
@@ -620,19 +658,20 @@ gboolean gst_pylon_configure_hdr_sequence(GstPylon *self, const gchar *hdr_seque
         GST_INFO("Set %d: PixelFormat set to %s", i, pixelformat_val.c_str());
       }
 
-      // Preserve Gain in each set
-      if (has_gain) {
-        if (seqGain.IsValid() && seqGain.IsWritable()) {
-          gdouble current_gain = seqGain.GetValue();
-          GST_INFO("Set %d: Gain is %.2f, setting to %.2f", i, current_gain, gain_val);
-          seqGain.SetValue(gain_val);
-          GST_INFO("Set %d: Gain set to %.2f", i, gain_val);
-        } else if (seqGainRaw.IsValid() && seqGainRaw.IsWritable()) {
-          gint64 current_gain = seqGainRaw.GetValue();
-          GST_INFO("Set %d: GainRaw is %ld, setting to %.0f", i, current_gain, gain_val);
-          seqGainRaw.SetValue((gint64)gain_val);
-          GST_INFO("Set %d: GainRaw set to %.0f", i, gain_val);
-        }
+      // Set Gain for this set
+      if (has_gain_float && seqGain.IsWritable()) {
+        gdouble current_gain = seqGain.IsReadable() ? seqGain.GetValue() : -1.0;
+        GST_INFO("Set %d: Gain is %.2f, setting to %.2f", i, current_gain, gain);
+        seqGain.SetValue(gain);
+        GST_INFO("Set %d: Gain set to %.2f", i, gain);
+      } else if (has_gain_raw && seqGainRaw.IsWritable()) {
+        gint64 current_gain = seqGainRaw.IsReadable() ? seqGainRaw.GetValue() : -1;
+        GST_INFO("Set %d: GainRaw is %ld, setting to %.0f", i, current_gain, gain);
+        seqGainRaw.SetValue((gint64)gain);
+        GST_INFO("Set %d: GainRaw set to %.0f", i, gain);
+      } else if (gain != 0.0) {
+        GST_WARNING("Set %d: Gain parameter not available or not writable, cannot set gain=%.2f",
+                    i, gain);
       }
 
       // Set exposure time for this set
@@ -691,7 +730,9 @@ gboolean gst_pylon_configure_hdr_sequence(GstPylon *self, const gchar *hdr_seque
       GST_WARNING("Cannot enable sequencer mode - not writable");
     }
 
-    g_strfreev(exposures);
+    g_strfreev(steps);
+    g_free(exposures);
+    g_free(gains);
     GST_INFO("HDR sequence configuration completed successfully");
 
   } catch (const Pylon::GenericException &e) {
@@ -724,39 +765,100 @@ gboolean gst_pylon_configure_dual_hdr_sequence(GstPylon *self,
   try {
     GenApi::INodeMap &nodemap = self->camera->GetNodeMap();
 
-    // Parse exposure values from both sequences
-    gchar **exposures1 = g_strsplit(hdr_sequence1, ",", -1);
-    gchar **exposures2 = g_strsplit(hdr_sequence2, ",", -1);
-    guint num_exposures1 = g_strv_length(exposures1);
-    guint num_exposures2 = g_strv_length(exposures2);
+    // Parse exposure:gain pairs from both sequences
+    // Format: "exposure1:gain1,exposure2:gain2" or "exposure1,exposure2" (gain defaults to 0)
+    gchar **steps1 = g_strsplit(hdr_sequence1, ",", -1);
+    gchar **steps2 = g_strsplit(hdr_sequence2, ",", -1);
+    guint num_steps1 = g_strv_length(steps1);
+    guint num_steps2 = g_strv_length(steps2);
 
     // Validate sequence lengths
-    if (num_exposures1 == 0 || num_exposures2 == 0) {
-      g_strfreev(exposures1);
-      g_strfreev(exposures2);
+    if (num_steps1 == 0 || num_steps2 == 0) {
+      g_strfreev(steps1);
+      g_strfreev(steps2);
       g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
-                  "HDR sequences must have at least 1 exposure value");
+                  "HDR sequences must have at least 1 step");
       return FALSE;
     }
 
+    // Parse Profile 0 steps into exposure and gain arrays
+    gdouble *exposures1 = g_new0(gdouble, num_steps1);
+    gdouble *gains1 = g_new0(gdouble, num_steps1);
+
+    for (guint i = 0; i < num_steps1; i++) {
+      gchar **parts = g_strsplit(steps1[i], ":", 2);
+
+      if (parts[0]) {
+        exposures1[i] = g_strtod(parts[0], NULL);
+        gains1[i] = parts[1] ? g_strtod(parts[1], NULL) : 0.0;
+        GST_DEBUG("Profile 0 Step %d: exposure=%.2f μs, gain=%.2f", i, exposures1[i], gains1[i]);
+      } else {
+        g_strfreev(parts);
+        g_strfreev(steps1);
+        g_strfreev(steps2);
+        g_free(exposures1);
+        g_free(gains1);
+        g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
+                    "Failed to parse Profile 0 step %d", i);
+        return FALSE;
+      }
+
+      g_strfreev(parts);
+    }
+
+    // Parse Profile 1 steps into exposure and gain arrays
+    gdouble *exposures2 = g_new0(gdouble, num_steps2);
+    gdouble *gains2 = g_new0(gdouble, num_steps2);
+
+    for (guint i = 0; i < num_steps2; i++) {
+      gchar **parts = g_strsplit(steps2[i], ":", 2);
+
+      if (parts[0]) {
+        exposures2[i] = g_strtod(parts[0], NULL);
+        gains2[i] = parts[1] ? g_strtod(parts[1], NULL) : 0.0;
+        GST_DEBUG("Profile 1 Step %d: exposure=%.2f μs, gain=%.2f", i, exposures2[i], gains2[i]);
+      } else {
+        g_strfreev(parts);
+        g_strfreev(steps1);
+        g_strfreev(steps2);
+        g_free(exposures1);
+        g_free(gains1);
+        g_free(exposures2);
+        g_free(gains2);
+        g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
+                    "Failed to parse Profile 1 step %d", i);
+        return FALSE;
+      }
+
+      g_strfreev(parts);
+    }
+
     // Check maximum sets limit (most cameras support 16 sets)
-    guint total_sets = num_exposures1 + num_exposures2;
+    guint total_sets = num_steps1 + num_steps2;
     if (total_sets > 16) {
-      g_strfreev(exposures1);
-      g_strfreev(exposures2);
+      g_strfreev(steps1);
+      g_strfreev(steps2);
+      g_free(exposures1);
+      g_free(gains1);
+      g_free(exposures2);
+      g_free(gains2);
       g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
                   "Total number of sets (%d) exceeds typical camera limit of 16", total_sets);
       return FALSE;
     }
 
-    GST_INFO("Profile 0: %d exposures, Profile 1: %d exposures, Total sets: %d",
-              num_exposures1, num_exposures2, total_sets);
+    GST_INFO("Profile 0: %d steps, Profile 1: %d steps, Total sets: %d",
+              num_steps1, num_steps2, total_sets);
 
     // Check if sequencer features are available
     Pylon::CEnumParameter sequencerMode(nodemap, "SequencerMode");
     if (!sequencerMode.IsValid()) {
-      g_strfreev(exposures1);
-      g_strfreev(exposures2);
+      g_strfreev(steps1);
+      g_strfreev(steps2);
+      g_free(exposures1);
+      g_free(gains1);
+      g_free(exposures2);
+      g_free(gains2);
       g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
                   "Camera does not support sequencer mode");
       return FALSE;
@@ -799,8 +901,12 @@ gboolean gst_pylon_configure_dual_hdr_sequence(GstPylon *self,
 
     // Check for path selector support
     if (!pathSelector.IsValid()) {
-      g_strfreev(exposures1);
-      g_strfreev(exposures2);
+      g_strfreev(steps1);
+      g_strfreev(steps2);
+      g_free(exposures1);
+      g_free(gains1);
+      g_free(exposures2);
+      g_free(gains2);
       g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
                   "Camera does not support SequencerPathSelector - required for dual profiles");
       return FALSE;
@@ -816,20 +922,22 @@ gboolean gst_pylon_configure_dual_hdr_sequence(GstPylon *self,
     // Get Gain parameter if available
     Pylon::CFloatParameter seqGain;
     Pylon::CIntegerParameter seqGainRaw;
-    gdouble gain_val = -1;
-    bool has_gain = false;
+    bool has_gain_float = false;
+    bool has_gain_raw = false;
 
     if (nodemap.GetNode("Gain")) {
       seqGain.Attach(nodemap.GetNode("Gain"));
-      if (seqGain.IsValid() && seqGain.IsReadable()) {
-        gain_val = seqGain.GetValue();
-        has_gain = true;
+      if (seqGain.IsValid()) {
+        has_gain_float = true;
+        GST_INFO("Camera supports Gain parameter (float)");
       }
-    } else if (nodemap.GetNode("GainRaw")) {
+    }
+
+    if (!has_gain_float && nodemap.GetNode("GainRaw")) {
       seqGainRaw.Attach(nodemap.GetNode("GainRaw"));
-      if (seqGainRaw.IsValid() && seqGainRaw.IsReadable()) {
-        gain_val = seqGainRaw.GetValue();
-        has_gain = true;
+      if (seqGainRaw.IsValid()) {
+        has_gain_raw = true;
+        GST_INFO("Camera supports GainRaw parameter (integer)");
       }
     }
 
@@ -838,8 +946,12 @@ gboolean gst_pylon_configure_dual_hdr_sequence(GstPylon *self,
       // Try alternative name
       exposureTime.Attach(nodemap.GetNode("ExposureTimeAbs"));
       if (!exposureTime.IsValid()) {
-        g_strfreev(exposures1);
-        g_strfreev(exposures2);
+        g_strfreev(steps1);
+        g_strfreev(steps2);
+        g_free(exposures1);
+        g_free(gains1);
+        g_free(exposures2);
+        g_free(gains2);
         g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
                     "Camera does not have ExposureTime parameter");
         return FALSE;
@@ -847,7 +959,7 @@ gboolean gst_pylon_configure_dual_hdr_sequence(GstPylon *self,
     }
 
     // Helper lambda to configure common settings for each set
-    auto configureCommonSettings = [&](guint set_num, gdouble exposure) {
+    auto configureCommonSettings = [&](guint set_num, gdouble exposure, gdouble gain) {
       GST_INFO("=== Configuring Set %d ===", set_num);
 
       // Select the set
@@ -862,7 +974,7 @@ gboolean gst_pylon_configure_dual_hdr_sequence(GstPylon *self,
         }
       }
 
-      // Set common parameters (width, height, pixel format, gain)
+      // Set common parameters (width, height, pixel format)
       if (seqWidth.IsValid() && seqWidth.IsWritable()) {
         seqWidth.SetValue(width_val);
       }
@@ -872,12 +984,16 @@ gboolean gst_pylon_configure_dual_hdr_sequence(GstPylon *self,
       if (seqPixelFormat.IsValid() && seqPixelFormat.IsWritable()) {
         seqPixelFormat.SetValue(pixelformat_val);
       }
-      if (has_gain) {
-        if (seqGain.IsValid() && seqGain.IsWritable()) {
-          seqGain.SetValue(gain_val);
-        } else if (seqGainRaw.IsValid() && seqGainRaw.IsWritable()) {
-          seqGainRaw.SetValue((gint64)gain_val);
-        }
+
+      // Set gain for this set
+      if (has_gain_float && seqGain.IsWritable()) {
+        seqGain.SetValue(gain);
+        GST_INFO("  Gain = %.2f", gain);
+      } else if (has_gain_raw && seqGainRaw.IsWritable()) {
+        seqGainRaw.SetValue((gint64)gain);
+        GST_INFO("  GainRaw = %.0f", gain);
+      } else if (gain != 0.0) {
+        GST_WARNING("  Gain parameter not available or not writable, cannot set gain=%.2f", gain);
       }
 
       // Set exposure time
@@ -899,35 +1015,44 @@ gboolean gst_pylon_configure_dual_hdr_sequence(GstPylon *self,
 
     // Calculate set indices for profiles
     guint profile0_first = 0;
-    guint profile0_last = num_exposures1 - 1;
-    guint profile1_first = num_exposures1;
-    guint profile1_last = num_exposures1 + num_exposures2 - 1;
+    guint profile0_last = num_steps1 - 1;
+    guint profile1_first = num_steps1;
+    guint profile1_last = num_steps1 + num_steps2 - 1;
 
     GST_INFO("Set allocation: Profile 0 [%d-%d], Profile 1 [%d-%d]",
              profile0_first, profile0_last, profile1_first, profile1_last);
 
     // ===== Configure Profile 0 sets =====
-    for (guint i = 0; i < num_exposures1; i++) {
+    for (guint i = 0; i < num_steps1; i++) {
       guint set_num = i;
-      gdouble exposure = g_strtod(exposures1[i], NULL);
+      gdouble exposure = exposures1[i];
+      gdouble gain = gains1[i];
 
-      GST_INFO("=== Configuring Set %d (Profile 0, exposure %d/%d: %.2fμs) ===",
-               set_num, i+1, num_exposures1, exposure);
+      GST_INFO("=== Configuring Set %d (Profile 0, step %d/%d: %.2fμs, gain=%.2f) ===",
+               set_num, i+1, num_steps1, exposure, gain);
 
-      configureCommonSettings(set_num, exposure);
+      configureCommonSettings(set_num, exposure, gain);
 
       // ALL sets in Profile 0 get software signal on Path 0
       // Path 0: Switch to Profile 1 on SoftwareSignal1 (checked first)
       pathSelector.SetValue(0);
       setNext.SetValue(profile1_first);
       if (!seqTriggerSource.IsValid()) {
-        g_strfreev(exposures1);
-        g_strfreev(exposures2);
+        g_strfreev(steps1);
+        g_strfreev(steps2);
+        g_free(exposures1);
+        g_free(gains1);
+        g_free(exposures2);
+        g_free(gains2);
         throw Pylon::GenericException("SequencerTriggerSource parameter not available", __FILE__, __LINE__);
       }
       if (!seqTriggerSource.CanSetValue("SoftwareSignal1")) {
-        g_strfreev(exposures1);
-        g_strfreev(exposures2);
+        g_strfreev(steps1);
+        g_strfreev(steps2);
+        g_free(exposures1);
+        g_free(gains1);
+        g_free(exposures2);
+        g_free(gains2);
         throw Pylon::GenericException("Cannot set SequencerTriggerSource to SoftwareSignal1", __FILE__, __LINE__);
       }
       seqTriggerSource.SetValue("SoftwareSignal1");
@@ -945,8 +1070,12 @@ gboolean gst_pylon_configure_dual_hdr_sequence(GstPylon *self,
         GST_INFO("  Path 1 (default): Next = %d, Trigger = %s", set_num + 1, HDR_SEQUENCER_TRIGGER);
       }
       if (!seqTriggerSource.CanSetValue(HDR_SEQUENCER_TRIGGER)) {
-        g_strfreev(exposures1);
-        g_strfreev(exposures2);
+        g_strfreev(steps1);
+        g_strfreev(steps2);
+        g_free(exposures1);
+        g_free(gains1);
+        g_free(exposures2);
+        g_free(gains2);
         throw Pylon::GenericException(
           (std::string("Cannot set SequencerTriggerSource to ") + HDR_SEQUENCER_TRIGGER).c_str(),
           __FILE__, __LINE__);
@@ -958,27 +1087,36 @@ gboolean gst_pylon_configure_dual_hdr_sequence(GstPylon *self,
     }
 
     // ===== Configure Profile 1 sets =====
-    for (guint i = 0; i < num_exposures2; i++) {
+    for (guint i = 0; i < num_steps2; i++) {
       guint set_num = profile1_first + i;
-      gdouble exposure = g_strtod(exposures2[i], NULL);
+      gdouble exposure = exposures2[i];
+      gdouble gain = gains2[i];
 
-      GST_INFO("=== Configuring Set %d (Profile 1, exposure %d/%d: %.2fμs) ===",
-               set_num, i+1, num_exposures2, exposure);
+      GST_INFO("=== Configuring Set %d (Profile 1, step %d/%d: %.2fμs, gain=%.2f) ===",
+               set_num, i+1, num_steps2, exposure, gain);
 
-      configureCommonSettings(set_num, exposure);
+      configureCommonSettings(set_num, exposure, gain);
 
       // ALL sets in Profile 1 get software signal on Path 0
       // Path 0: Switch to Profile 0 on SoftwareSignal2 (checked first)
       pathSelector.SetValue(0);
       setNext.SetValue(profile0_first);
       if (!seqTriggerSource.IsValid()) {
-        g_strfreev(exposures1);
-        g_strfreev(exposures2);
+        g_strfreev(steps1);
+        g_strfreev(steps2);
+        g_free(exposures1);
+        g_free(gains1);
+        g_free(exposures2);
+        g_free(gains2);
         throw Pylon::GenericException("SequencerTriggerSource parameter not available", __FILE__, __LINE__);
       }
       if (!seqTriggerSource.CanSetValue("SoftwareSignal2")) {
-        g_strfreev(exposures1);
-        g_strfreev(exposures2);
+        g_strfreev(steps1);
+        g_strfreev(steps2);
+        g_free(exposures1);
+        g_free(gains1);
+        g_free(exposures2);
+        g_free(gains2);
         throw Pylon::GenericException("Cannot set SequencerTriggerSource to SoftwareSignal2", __FILE__, __LINE__);
       }
       seqTriggerSource.SetValue("SoftwareSignal2");
@@ -996,8 +1134,12 @@ gboolean gst_pylon_configure_dual_hdr_sequence(GstPylon *self,
         GST_INFO("  Path 1 (default): Next = %d, Trigger = %s", set_num + 1, HDR_SEQUENCER_TRIGGER);
       }
       if (!seqTriggerSource.CanSetValue(HDR_SEQUENCER_TRIGGER)) {
-        g_strfreev(exposures1);
-        g_strfreev(exposures2);
+        g_strfreev(steps1);
+        g_strfreev(steps2);
+        g_free(exposures1);
+        g_free(gains1);
+        g_free(exposures2);
+        g_free(gains2);
         throw Pylon::GenericException(
           (std::string("Cannot set SequencerTriggerSource to ") + HDR_SEQUENCER_TRIGGER).c_str(),
           __FILE__, __LINE__);
@@ -1020,8 +1162,12 @@ gboolean gst_pylon_configure_dual_hdr_sequence(GstPylon *self,
       GST_INFO("Sequencer mode enabled");
     }
 
-    g_strfreev(exposures1);
-    g_strfreev(exposures2);
+    g_strfreev(steps1);
+    g_strfreev(steps2);
+    g_free(exposures1);
+    g_free(gains1);
+    g_free(exposures2);
+    g_free(gains2);
     GST_INFO("Dual HDR profile configuration with path branching completed successfully");
 
   } catch (const Pylon::GenericException &e) {
