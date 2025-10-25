@@ -14,6 +14,22 @@ endif()
 set(PYLON_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/pylon-build)
 set(PYLON_INSTALL_DIR ${CMAKE_CURRENT_BINARY_DIR}/pylon-install)
 
+# Map CMAKE_BUILD_TYPE to Meson buildtype for full optimization
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    set(MESON_BUILDTYPE "release")
+    message(STATUS "Configuring gst-plugin-pylon with Meson buildtype: release (-O3)")
+elseif(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(MESON_BUILDTYPE "debug")
+    message(STATUS "Configuring gst-plugin-pylon with Meson buildtype: debug")
+elseif(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+    set(MESON_BUILDTYPE "debugoptimized")
+    message(STATUS "Configuring gst-plugin-pylon with Meson buildtype: debugoptimized (-O2 -g)")
+else()
+    # Default to release for maximum performance in production
+    set(MESON_BUILDTYPE "release")
+    message(STATUS "CMAKE_BUILD_TYPE not set, defaulting gst-plugin-pylon to Meson buildtype: release (-O3)")
+endif()
+
 # Configure and build using Meson
 ExternalProject_Add(gst-plugin-pylon-meson
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}
@@ -21,6 +37,7 @@ ExternalProject_Add(gst-plugin-pylon-meson
     CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env PYLON_ROOT=$ENV{PYLON_ROOT}
                       meson setup ${PYLON_BUILD_DIR} ${CMAKE_CURRENT_SOURCE_DIR}
                       --prefix=${PYLON_INSTALL_DIR}
+                      --buildtype=${MESON_BUILDTYPE}
                       -Dtests=disabled
                       -Dexamples=disabled
     BUILD_COMMAND ninja -C ${PYLON_BUILD_DIR}
