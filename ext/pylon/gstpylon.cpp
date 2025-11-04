@@ -1344,7 +1344,7 @@ gboolean gst_pylon_capture(GstPylon *self, GstBuffer **buf,
   bool retry_grab = true;
   bool buffer_error = false;
   gint retry_frame_counter = 0;
-  static const gint max_frames_to_skip = 100;
+  static const gint max_frames_to_skip = G_MAXINT - 16;
   Pylon::CBaslerUniversalGrabResultPtr *grab_result_ptr = NULL;
 
   while (retry_grab) {
