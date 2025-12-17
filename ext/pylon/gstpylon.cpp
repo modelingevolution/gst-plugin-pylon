@@ -2043,6 +2043,77 @@ gboolean gst_pylon_is_same_device(GstPylon *self, const gint device_index,
          self->requested_device_serial_number == serial_number;
 }
 
+gboolean gst_pylon_configure_line2(GstPylon *self, gboolean illumination,
+                                   GError **err) {
+  g_return_val_if_fail(self, FALSE);
+  g_return_val_if_fail(err && *err == NULL, FALSE);
+
+  try {
+    auto &camera = self->camera;
+    if (!camera || !camera->IsOpen()) {
+      g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
+                  "Camera is not open");
+      return FALSE;
+    }
+
+    // Select Line2
+    if (GenApi::IsWritable(camera->LineSelector)) {
+      camera->LineSelector.SetValue(Basler_UniversalCameraParams::LineSelector_Line2);
+      GST_INFO("Line2 selected");
+    } else {
+      g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
+                  "LineSelector is not writable");
+      return FALSE;
+    }
+
+    if (illumination) {
+      // Configure for illumination: Output mode with ExposureActive
+      if (GenApi::IsWritable(camera->LineMode)) {
+        camera->LineMode.SetValue(Basler_UniversalCameraParams::LineMode_Output);
+        GST_INFO("Line2 configured as Output");
+      } else {
+        g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
+                    "LineMode is not writable");
+        return FALSE;
+      }
+
+      if (GenApi::IsWritable(camera->LineSource)) {
+        camera->LineSource.SetValue(Basler_UniversalCameraParams::LineSource_ExposureActive);
+        GST_INFO("Line2 source set to ExposureActive");
+      } else {
+        g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
+                    "LineSource is not writable");
+        return FALSE;
+      }
+    } else {
+      // Configure as input with LineSource Off
+      if (GenApi::IsWritable(camera->LineMode)) {
+        camera->LineMode.SetValue(Basler_UniversalCameraParams::LineMode_Input);
+        GST_INFO("Line2 configured as Input");
+      } else {
+        g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
+                    "LineMode is not writable");
+        return FALSE;
+      }
+
+      if (GenApi::IsWritable(camera->LineSource)) {
+        camera->LineSource.SetValue(Basler_UniversalCameraParams::LineSource_Off);
+        GST_INFO("Line2 source set to Off");
+      } else {
+        g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
+                    "LineSource is not writable");
+        return FALSE;
+      }
+    }
+
+    return TRUE;
+  } catch (const Pylon::GenericException &e) {
+    g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
+                "Pylon error configuring Line2: %s", e.GetDescription());
+    return FALSE;
+  }
+}
+
 #ifdef NVMM_ENABLED
 void gst_pylon_set_nvsurface_layout(
     GstPylon *self, const GstPylonNvsurfaceLayoutEnum nvsurface_layout) {

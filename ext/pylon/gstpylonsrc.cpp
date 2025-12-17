@@ -79,6 +79,7 @@ struct _GstPylonSrc {
   HdrProfileSwitcher *hdr_switcher;
   GObject *cam;
   GObject *stream;
+  gboolean illumination;
 
 #ifdef NVMM_ENABLED
   GstPylonNvsurfaceLayoutEnum nvsurface_layout;
@@ -124,6 +125,7 @@ enum {
   PROP_HDR_PROFILE,
   PROP_CAM,
   PROP_STREAM,
+  PROP_ILLUMINATION,
 #ifdef NVMM_ENABLED
   PROP_NVSURFACE_LAYOUT,
   PROP_GPU_ID,
@@ -144,6 +146,7 @@ enum {
 #define PROP_CAM_DEFAULT NULL
 #define PROP_STREAM_DEFAULT NULL
 #define PROP_CAPTURE_ERROR_DEFAULT ENUM_ABORT
+#define PROP_ILLUMINATION_DEFAULT FALSE
 #ifdef NVMM_ENABLED
 #  define PROP_GPU_ID_MIN 0
 #  define PROP_GPU_ID_MAX G_MAXUINT32
@@ -366,6 +369,17 @@ static void gst_pylon_src_class_init(GstPylonSrcClass *klass) {
           -1, 1, PROP_HDR_PROFILE_DEFAULT,
           static_cast<GParamFlags>(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 
+  g_object_class_install_property(
+      gobject_class, PROP_ILLUMINATION,
+      g_param_spec_boolean(
+          "illumination", "Illumination Control",
+          "Enable external illumination control via Line2. "
+          "When true, Line2 is configured as output with ExposureActive source. "
+          "When false, Line2 is configured as input with LineSource Off.",
+          PROP_ILLUMINATION_DEFAULT,
+          static_cast<GParamFlags>(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+                                   GST_PARAM_MUTABLE_READY)));
+
 #ifdef NVMM_ENABLED
   g_object_class_install_property(
       gobject_class, PROP_NVSURFACE_LAYOUT,
@@ -463,6 +477,7 @@ static void gst_pylon_src_init(GstPylonSrc *self) {
   self->hdr_switcher = new HdrProfileSwitcher();
   self->cam = PROP_CAM_DEFAULT;
   self->stream = PROP_STREAM_DEFAULT;
+  self->illumination = PROP_ILLUMINATION_DEFAULT;
   gst_video_info_init(&self->video_info);
 #ifdef NVMM_ENABLED
   self->nvsurface_layout = PROP_NVSURFACE_LAYOUT_DEFAULT;
@@ -543,6 +558,9 @@ static void gst_pylon_src_set_property(GObject *object, guint property_id,
       self->gpu_id = g_value_get_int(value);
       break;
 #endif
+    case PROP_ILLUMINATION:
+      self->illumination = g_value_get_boolean(value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID(object, property_id, pspec);
       break;
@@ -599,6 +617,9 @@ static void gst_pylon_src_get_property(GObject *object, guint property_id,
       g_value_set_uint(value, self->gpu_id);
       break;
 #endif
+    case PROP_ILLUMINATION:
+      g_value_set_boolean(value, self->illumination);
+      break;
     case PROP_CAM:
       g_value_set_object(value, self->cam);
       break;
@@ -1042,6 +1063,20 @@ static gboolean gst_pylon_src_start(GstBaseSrc *src) {
 
   if (using_pfs && ret == FALSE && error) {
     goto log_gst_error;
+  }
+
+  /* Configure Line2 for illumination control using Pylon API */
+  if (self->pylon) {
+    GError *line_err = NULL;
+    GST_INFO_OBJECT(self, "Configuring Line2 for illumination=%d", self->illumination);
+    if (!gst_pylon_configure_line2(self->pylon, self->illumination, &line_err)) {
+      GST_ERROR_OBJECT(self, "Failed to configure Line2: %s",
+                      line_err ? line_err->message : "unknown error");
+      g_clear_error(&line_err);
+      /* Continue anyway - don't fail the pipeline if Line2 configuration fails */
+    } else {
+      GST_INFO_OBJECT(self, "Line2 configured successfully");
+    }
   }
 
   self->duration = GST_CLOCK_TIME_NONE;

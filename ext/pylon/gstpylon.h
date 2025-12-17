@@ -91,6 +91,9 @@ gboolean gst_pylon_is_same_device(GstPylon *self, const gint device_index,
                                   const gchar *device_user_name,
                                   const gchar *device_serial_number);
 
+gboolean gst_pylon_configure_line2(GstPylon *self, gboolean illumination,
+                                   GError **err);
+
 #ifdef NVMM_ENABLED
 void gst_pylon_set_nvsurface_layout(
     GstPylon *self, const GstPylonNvsurfaceLayoutEnum nvsurface_layout);
