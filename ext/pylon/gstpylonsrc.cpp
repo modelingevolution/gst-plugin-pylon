@@ -373,9 +373,9 @@ static void gst_pylon_src_class_init(GstPylonSrcClass *klass) {
       gobject_class, PROP_ILLUMINATION,
       g_param_spec_boolean(
           "illumination", "Illumination Control",
-          "Enable external illumination control via Line2. "
-          "When true, Line2 is configured as output with ExposureActive source. "
-          "When false, Line2 is configured as input with LineSource Off.",
+          "Enable external illumination control via Line2 and Line3. "
+          "When true: Line2=Output+ExposureActive, Line3=Output+Counter1Active+Inverted. "
+          "When false: Line2=Input+Off, Line3=Output+Counter1Active+NotInverted.",
           PROP_ILLUMINATION_DEFAULT,
           static_cast<GParamFlags>(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
                                    GST_PARAM_MUTABLE_READY)));
@@ -1065,17 +1065,17 @@ static gboolean gst_pylon_src_start(GstBaseSrc *src) {
     goto log_gst_error;
   }
 
-  /* Configure Line2 for illumination control using Pylon API */
+  /* Configure Line2 and Line3 for illumination control using Pylon API */
   if (self->pylon) {
     GError *line_err = NULL;
-    GST_INFO_OBJECT(self, "Configuring Line2 for illumination=%d", self->illumination);
+    GST_INFO_OBJECT(self, "Configuring Line2 and Line3 for illumination=%d", self->illumination);
     if (!gst_pylon_configure_line2(self->pylon, self->illumination, &line_err)) {
-      GST_ERROR_OBJECT(self, "Failed to configure Line2: %s",
+      GST_ERROR_OBJECT(self, "Failed to configure illumination lines: %s",
                       line_err ? line_err->message : "unknown error");
       g_clear_error(&line_err);
-      /* Continue anyway - don't fail the pipeline if Line2 configuration fails */
+      /* Continue anyway - don't fail the pipeline if line configuration fails */
     } else {
-      GST_INFO_OBJECT(self, "Line2 configured successfully");
+      GST_INFO_OBJECT(self, "Line2 and Line3 configured successfully");
     }
   }
 

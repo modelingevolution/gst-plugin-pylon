@@ -2106,10 +2106,49 @@ gboolean gst_pylon_configure_line2(GstPylon *self, gboolean illumination,
       }
     }
 
+    // Now configure Line3
+    if (GenApi::IsWritable(camera->LineSelector)) {
+      camera->LineSelector.SetValue(Basler_UniversalCameraParams::LineSelector_Line3);
+      GST_INFO("Line3 selected");
+    } else {
+      g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
+                  "LineSelector is not writable for Line3");
+      return FALSE;
+    }
+
+    // Line3 is always Output mode with Counter1Active source
+    if (GenApi::IsWritable(camera->LineMode)) {
+      camera->LineMode.SetValue(Basler_UniversalCameraParams::LineMode_Output);
+      GST_INFO("Line3 configured as Output");
+    } else {
+      g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
+                  "LineMode is not writable for Line3");
+      return FALSE;
+    }
+
+    if (GenApi::IsWritable(camera->LineSource)) {
+      camera->LineSource.SetValue(Basler_UniversalCameraParams::LineSource_Counter1Active);
+      GST_INFO("Line3 source set to Counter1Active");
+    } else {
+      g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
+                  "LineSource is not writable for Line3");
+      return FALSE;
+    }
+
+    // Configure Line3 inverter based on illumination
+    if (GenApi::IsWritable(camera->LineInverter)) {
+      camera->LineInverter.SetValue(illumination);  // true when illumination=true, false when illumination=false
+      GST_INFO("Line3 inverter set to %s", illumination ? "true" : "false");
+    } else {
+      g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
+                  "LineInverter is not writable for Line3");
+      return FALSE;
+    }
+
     return TRUE;
   } catch (const Pylon::GenericException &e) {
     g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
-                "Pylon error configuring Line2: %s", e.GetDescription());
+                "Pylon error configuring illumination lines: %s", e.GetDescription());
     return FALSE;
   }
 }
