@@ -80,6 +80,8 @@ struct _GstPylonSrc {
   GObject *cam;
   GObject *stream;
   gboolean illumination;
+  gint sensor_offset_x;
+  gint sensor_offset_y;
 
 #ifdef NVMM_ENABLED
   GstPylonNvsurfaceLayoutEnum nvsurface_layout;
@@ -127,6 +129,8 @@ enum {
   PROP_STREAM,
   PROP_ILLUMINATION,
   PROP_DEVICE_TEMPERATURE,
+  PROP_SENSOR_OFFSET_X,
+  PROP_SENSOR_OFFSET_Y,
 #ifdef NVMM_ENABLED
   PROP_NVSURFACE_LAYOUT,
   PROP_GPU_ID,
@@ -148,6 +152,8 @@ enum {
 #define PROP_STREAM_DEFAULT NULL
 #define PROP_CAPTURE_ERROR_DEFAULT ENUM_ABORT
 #define PROP_ILLUMINATION_DEFAULT FALSE
+#define PROP_SENSOR_OFFSET_X_DEFAULT 0
+#define PROP_SENSOR_OFFSET_Y_DEFAULT 0
 #ifdef NVMM_ENABLED
 #  define PROP_GPU_ID_MIN 0
 #  define PROP_GPU_ID_MAX G_MAXUINT32
@@ -390,6 +396,26 @@ static void gst_pylon_src_class_init(GstPylonSrcClass *klass) {
           -273.15, 200.0, 0.0,
           static_cast<GParamFlags>(G_PARAM_READABLE | G_PARAM_STATIC_STRINGS)));
 
+  g_object_class_install_property(
+      gobject_class, PROP_SENSOR_OFFSET_X,
+      g_param_spec_int(
+          "sensor-offset-x", "Sensor Offset X",
+          "X offset from sensor origin in pixels. Applied to all HDR sequencer sets. "
+          "Use this to grab image from a different horizontal position on the sensor.",
+          0, G_MAXINT32, PROP_SENSOR_OFFSET_X_DEFAULT,
+          static_cast<GParamFlags>(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+                                   GST_PARAM_MUTABLE_READY)));
+
+  g_object_class_install_property(
+      gobject_class, PROP_SENSOR_OFFSET_Y,
+      g_param_spec_int(
+          "sensor-offset-y", "Sensor Offset Y",
+          "Y offset from sensor origin in pixels. Applied to all HDR sequencer sets. "
+          "Use this to grab image from a different vertical position on the sensor.",
+          0, G_MAXINT32, PROP_SENSOR_OFFSET_Y_DEFAULT,
+          static_cast<GParamFlags>(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+                                   GST_PARAM_MUTABLE_READY)));
+
 #ifdef NVMM_ENABLED
   g_object_class_install_property(
       gobject_class, PROP_NVSURFACE_LAYOUT,
@@ -488,6 +514,8 @@ static void gst_pylon_src_init(GstPylonSrc *self) {
   self->cam = PROP_CAM_DEFAULT;
   self->stream = PROP_STREAM_DEFAULT;
   self->illumination = PROP_ILLUMINATION_DEFAULT;
+  self->sensor_offset_x = PROP_SENSOR_OFFSET_X_DEFAULT;
+  self->sensor_offset_y = PROP_SENSOR_OFFSET_Y_DEFAULT;
   gst_video_info_init(&self->video_info);
 #ifdef NVMM_ENABLED
   self->nvsurface_layout = PROP_NVSURFACE_LAYOUT_DEFAULT;
@@ -571,6 +599,12 @@ static void gst_pylon_src_set_property(GObject *object, guint property_id,
     case PROP_ILLUMINATION:
       self->illumination = g_value_get_boolean(value);
       break;
+    case PROP_SENSOR_OFFSET_X:
+      self->sensor_offset_x = g_value_get_int(value);
+      break;
+    case PROP_SENSOR_OFFSET_Y:
+      self->sensor_offset_y = g_value_get_int(value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID(object, property_id, pspec);
       break;
@@ -644,6 +678,12 @@ static void gst_pylon_src_get_property(GObject *object, guint property_id,
       g_value_set_double(value, temperature);
       break;
     }
+    case PROP_SENSOR_OFFSET_X:
+      g_value_set_int(value, self->sensor_offset_x);
+      break;
+    case PROP_SENSOR_OFFSET_Y:
+      g_value_set_int(value, self->sensor_offset_y);
+      break;
     case PROP_CAM:
       g_value_set_object(value, self->cam);
       break;
@@ -951,10 +991,14 @@ static gboolean gst_pylon_src_set_caps(GstBaseSrc *src, GstCaps *caps) {
         ret = gst_pylon_configure_dual_hdr_sequence(self->pylon,
                                                     self->hdr_sequence,
                                                     self->hdr_sequence2,
+                                                    self->sensor_offset_x,
+                                                    self->sensor_offset_y,
                                                     &error);
       } else {
         ret = gst_pylon_configure_hdr_sequence(self->pylon,
                                                self->hdr_sequence,
+                                               self->sensor_offset_x,
+                                               self->sensor_offset_y,
                                                &error);
       }
 

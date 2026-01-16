@@ -409,6 +409,7 @@ gboolean gst_pylon_set_pfs_config(GstPylon *self, const gchar *pfs_location,
 }
 
 gboolean gst_pylon_configure_hdr_sequence(GstPylon *self, const gchar *hdr_sequence,
+                                          gint offset_x, gint offset_y,
                                           GError **err) {
   g_return_val_if_fail(self, FALSE);
   g_return_val_if_fail(err && *err == NULL, FALSE);
@@ -418,7 +419,8 @@ gboolean gst_pylon_configure_hdr_sequence(GstPylon *self, const gchar *hdr_seque
     return TRUE;
   }
 
-  GST_INFO("Configuring HDR sequence: %s", hdr_sequence);
+  GST_INFO("Configuring HDR sequence: %s (offset_x=%d, offset_y=%d)",
+           hdr_sequence, offset_x, offset_y);
 
   try {
     GenApi::INodeMap &nodemap = self->camera->GetNodeMap();
@@ -563,6 +565,8 @@ gboolean gst_pylon_configure_hdr_sequence(GstPylon *self, const gchar *hdr_seque
     Pylon::CIntegerParameter setNext(nodemap, "SequencerSetNext");
     Pylon::CIntegerParameter seqWidth(nodemap, "Width");
     Pylon::CIntegerParameter seqHeight(nodemap, "Height");
+    Pylon::CIntegerParameter seqOffsetX(nodemap, "OffsetX");
+    Pylon::CIntegerParameter seqOffsetY(nodemap, "OffsetY");
     Pylon::CEnumParameter seqPixelFormat(nodemap, "PixelFormat");
 
     // Try to get Gain parameter (might be Gain or GainRaw)
@@ -650,6 +654,21 @@ gboolean gst_pylon_configure_hdr_sequence(GstPylon *self, const gchar *hdr_seque
         seqHeight.SetValue(height_val);
         GST_INFO("Set %d: Height set to %ld", i, height_val);
       }
+
+      // Set sensor offsets (must be set after Width/Height)
+      if (offset_x > 0 && seqOffsetX.IsValid() && seqOffsetX.IsWritable()) {
+        gint64 current_ox = seqOffsetX.GetValue();
+        GST_INFO("Set %d: OffsetX is %ld, setting to %d", i, current_ox, offset_x);
+        seqOffsetX.SetValue(offset_x);
+        GST_INFO("Set %d: OffsetX set to %d", i, offset_x);
+      }
+      if (offset_y > 0 && seqOffsetY.IsValid() && seqOffsetY.IsWritable()) {
+        gint64 current_oy = seqOffsetY.GetValue();
+        GST_INFO("Set %d: OffsetY is %ld, setting to %d", i, current_oy, offset_y);
+        seqOffsetY.SetValue(offset_y);
+        GST_INFO("Set %d: OffsetY set to %d", i, offset_y);
+      }
+
       if (seqPixelFormat.IsValid() && seqPixelFormat.IsWritable()) {
         Pylon::String_t current_fmt = seqPixelFormat.GetValue();
         GST_INFO("Set %d: PixelFormat is %s, setting to %s", i,
@@ -747,6 +766,7 @@ gboolean gst_pylon_configure_hdr_sequence(GstPylon *self, const gchar *hdr_seque
 gboolean gst_pylon_configure_dual_hdr_sequence(GstPylon *self,
                                                const gchar *hdr_sequence1,
                                                const gchar *hdr_sequence2,
+                                               gint offset_x, gint offset_y,
                                                GError **err) {
   g_return_val_if_fail(self, FALSE);
   g_return_val_if_fail(err && *err == NULL, FALSE);
@@ -758,7 +778,8 @@ gboolean gst_pylon_configure_dual_hdr_sequence(GstPylon *self,
     return FALSE;
   }
 
-  GST_INFO("Configuring dual HDR profiles with path branching:");
+  GST_INFO("Configuring dual HDR profiles with path branching (offset_x=%d, offset_y=%d):",
+           offset_x, offset_y);
   GST_INFO("  Profile 0: %s", hdr_sequence1);
   GST_INFO("  Profile 1: %s", hdr_sequence2);
 
@@ -896,6 +917,8 @@ gboolean gst_pylon_configure_dual_hdr_sequence(GstPylon *self,
     Pylon::CEnumParameter seqTriggerSource(nodemap, "SequencerTriggerSource");
     Pylon::CIntegerParameter seqWidth(nodemap, "Width");
     Pylon::CIntegerParameter seqHeight(nodemap, "Height");
+    Pylon::CIntegerParameter seqOffsetX(nodemap, "OffsetX");
+    Pylon::CIntegerParameter seqOffsetY(nodemap, "OffsetY");
     Pylon::CEnumParameter seqPixelFormat(nodemap, "PixelFormat");
     Pylon::CFloatParameter exposureTime(nodemap, "ExposureTime");
 
@@ -981,6 +1004,17 @@ gboolean gst_pylon_configure_dual_hdr_sequence(GstPylon *self,
       if (seqHeight.IsValid() && seqHeight.IsWritable()) {
         seqHeight.SetValue(height_val);
       }
+
+      // Set sensor offsets (must be set after Width/Height)
+      if (offset_x > 0 && seqOffsetX.IsValid() && seqOffsetX.IsWritable()) {
+        seqOffsetX.SetValue(offset_x);
+        GST_INFO("  OffsetX = %d", offset_x);
+      }
+      if (offset_y > 0 && seqOffsetY.IsValid() && seqOffsetY.IsWritable()) {
+        seqOffsetY.SetValue(offset_y);
+        GST_INFO("  OffsetY = %d", offset_y);
+      }
+
       if (seqPixelFormat.IsValid() && seqPixelFormat.IsWritable()) {
         seqPixelFormat.SetValue(pixelformat_val);
       }
