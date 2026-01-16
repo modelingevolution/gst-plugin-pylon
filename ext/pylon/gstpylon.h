@@ -94,6 +94,8 @@ gboolean gst_pylon_is_same_device(GstPylon *self, const gint device_index,
 gboolean gst_pylon_configure_line2(GstPylon *self, gboolean illumination,
                                    GError **err);
 
+gdouble gst_pylon_get_device_temperature(GstPylon *self, GError **err);
+
 #ifdef NVMM_ENABLED
 void gst_pylon_set_nvsurface_layout(
     GstPylon *self, const GstPylonNvsurfaceLayoutEnum nvsurface_layout);

@@ -126,6 +126,7 @@ enum {
   PROP_CAM,
   PROP_STREAM,
   PROP_ILLUMINATION,
+  PROP_DEVICE_TEMPERATURE,
 #ifdef NVMM_ENABLED
   PROP_NVSURFACE_LAYOUT,
   PROP_GPU_ID,
@@ -380,6 +381,15 @@ static void gst_pylon_src_class_init(GstPylonSrcClass *klass) {
           static_cast<GParamFlags>(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
                                    GST_PARAM_MUTABLE_READY)));
 
+  g_object_class_install_property(
+      gobject_class, PROP_DEVICE_TEMPERATURE,
+      g_param_spec_double(
+          "device-temperature", "Device Temperature",
+          "Current camera device temperature in degrees Celsius (read-only). "
+          "Returns -273.15 if the camera is not open or temperature is not readable.",
+          -273.15, 200.0, 0.0,
+          static_cast<GParamFlags>(G_PARAM_READABLE | G_PARAM_STATIC_STRINGS)));
+
 #ifdef NVMM_ENABLED
   g_object_class_install_property(
       gobject_class, PROP_NVSURFACE_LAYOUT,
@@ -620,6 +630,20 @@ static void gst_pylon_src_get_property(GObject *object, guint property_id,
     case PROP_ILLUMINATION:
       g_value_set_boolean(value, self->illumination);
       break;
+    case PROP_DEVICE_TEMPERATURE: {
+      GError *error = NULL;
+      gdouble temperature = -273.15;
+      if (self->pylon) {
+        temperature = gst_pylon_get_device_temperature(self->pylon, &error);
+        if (error) {
+          GST_WARNING_OBJECT(self, "Failed to get device temperature: %s",
+                             error->message);
+          g_error_free(error);
+        }
+      }
+      g_value_set_double(value, temperature);
+      break;
+    }
     case PROP_CAM:
       g_value_set_object(value, self->cam);
       break;

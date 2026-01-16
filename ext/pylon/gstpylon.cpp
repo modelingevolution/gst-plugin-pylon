@@ -2153,6 +2153,34 @@ gboolean gst_pylon_configure_line2(GstPylon *self, gboolean illumination,
   }
 }
 
+gdouble gst_pylon_get_device_temperature(GstPylon *self, GError **err) {
+  g_return_val_if_fail(self, -273.15);
+  g_return_val_if_fail(err && *err == NULL, -273.15);
+
+  try {
+    auto &camera = self->camera;
+    if (!camera || !camera->IsOpen()) {
+      g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
+                  "Camera is not open");
+      return -273.15;
+    }
+
+    if (GenApi::IsReadable(camera->DeviceTemperature)) {
+      gdouble temperature = camera->DeviceTemperature.GetValue();
+      GST_DEBUG("Device temperature: %.2f C", temperature);
+      return temperature;
+    } else {
+      g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
+                  "DeviceTemperature is not readable");
+      return -273.15;
+    }
+  } catch (const Pylon::GenericException &e) {
+    g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
+                "Pylon error reading device temperature: %s", e.GetDescription());
+    return -273.15;
+  }
+}
+
 #ifdef NVMM_ENABLED
 void gst_pylon_set_nvsurface_layout(
     GstPylon *self, const GstPylonNvsurfaceLayoutEnum nvsurface_layout) {
