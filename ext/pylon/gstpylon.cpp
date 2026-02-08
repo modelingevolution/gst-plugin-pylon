@@ -1370,7 +1370,7 @@ static void free_ptr_grab_result(gpointer data) {
 
 gboolean gst_pylon_capture(GstPylon *self, GstBuffer **buf,
                            GstPylonCaptureErrorEnum capture_error,
-                           GError **err) {
+                           std::atomic<guint64> *error_count, GError **err) {
   g_return_val_if_fail(self, FALSE);
   g_return_val_if_fail(buf, FALSE);
   g_return_val_if_fail(err && *err == NULL, FALSE);
@@ -1401,6 +1401,7 @@ gboolean gst_pylon_capture(GstPylon *self, GstBuffer **buf,
         GST_ELEMENT_WARNING(self->gstpylonsrc, LIBRARY, FAILED,
                             ("Capture failed. Keeping buffer."),
                             ("%s", error_message.c_str()));
+        error_count->fetch_add(1, std::memory_order_relaxed);
         retry_grab = false;
         break;
       case ENUM_ABORT:
@@ -1419,6 +1420,7 @@ gboolean gst_pylon_capture(GstPylon *self, GstBuffer **buf,
           GST_ELEMENT_WARNING(self->gstpylonsrc, LIBRARY, FAILED,
                               ("Capture failed. Skipping buffer."),
                               ("%s", error_message.c_str()));
+          error_count->fetch_add(1, std::memory_order_relaxed);
           delete grab_result_ptr;
           grab_result_ptr = NULL;
           retry_grab = true;

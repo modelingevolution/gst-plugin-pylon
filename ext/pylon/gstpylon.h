@@ -36,6 +36,8 @@
 #include <glib.h>
 #include <gst/gst.h>
 
+#include <atomic>
+
 typedef struct _GstPylon GstPylon;
 
 typedef enum {
@@ -66,7 +68,7 @@ gboolean gst_pylon_stop(GstPylon *self, GError **err);
 void gst_pylon_interrupt_capture(GstPylon *self);
 gboolean gst_pylon_capture(GstPylon *self, GstBuffer **buf,
                            GstPylonCaptureErrorEnum capture_error,
-                           GError **err);
+                           std::atomic<guint64> *error_count, GError **err);
 GstCaps *gst_pylon_query_configuration(GstPylon *self, GError **err);
 gboolean gst_pylon_get_startup_geometry(GstPylon *self, gint *start_width,
                                         gint *start_height);

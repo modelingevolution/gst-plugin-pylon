@@ -59,6 +59,8 @@
 #include <gst/pylon/gstpylonincludes.h>
 #include <gst/video/video.h>
 
+#include <atomic>
+
 struct _GstPylonSrc {
   GstPushSrc base_pylonsrc;
   GstPylon *pylon;
@@ -82,6 +84,7 @@ struct _GstPylonSrc {
   gboolean illumination;
   gint sensor_offset_x;
   gint sensor_offset_y;
+  std::atomic<guint64> error_count;
 
 #ifdef NVMM_ENABLED
   GstPylonNvsurfaceLayoutEnum nvsurface_layout;
@@ -131,6 +134,7 @@ enum {
   PROP_DEVICE_TEMPERATURE,
   PROP_SENSOR_OFFSET_X,
   PROP_SENSOR_OFFSET_Y,
+  PROP_ERROR_COUNT,
 #ifdef NVMM_ENABLED
   PROP_NVSURFACE_LAYOUT,
   PROP_GPU_ID,
@@ -416,6 +420,15 @@ static void gst_pylon_src_class_init(GstPylonSrcClass *klass) {
           static_cast<GParamFlags>(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
                                    GST_PARAM_MUTABLE_READY)));
 
+  g_object_class_install_property(
+      gobject_class, PROP_ERROR_COUNT,
+      g_param_spec_uint64(
+          "error-count", "Capture Error Count",
+          "Total number of capture errors encountered (incremented on both keep and skip). "
+          "Read-only counter, reset when the element restarts.",
+          0, G_MAXUINT64, 0,
+          static_cast<GParamFlags>(G_PARAM_READABLE | G_PARAM_STATIC_STRINGS)));
+
 #ifdef NVMM_ENABLED
   g_object_class_install_property(
       gobject_class, PROP_NVSURFACE_LAYOUT,
@@ -516,6 +529,7 @@ static void gst_pylon_src_init(GstPylonSrc *self) {
   self->illumination = PROP_ILLUMINATION_DEFAULT;
   self->sensor_offset_x = PROP_SENSOR_OFFSET_X_DEFAULT;
   self->sensor_offset_y = PROP_SENSOR_OFFSET_Y_DEFAULT;
+  self->error_count.store(0, std::memory_order_relaxed);
   gst_video_info_init(&self->video_info);
 #ifdef NVMM_ENABLED
   self->nvsurface_layout = PROP_NVSURFACE_LAYOUT_DEFAULT;
@@ -683,6 +697,9 @@ static void gst_pylon_src_get_property(GObject *object, guint property_id,
       break;
     case PROP_SENSOR_OFFSET_Y:
       g_value_set_int(value, self->sensor_offset_y);
+      break;
+    case PROP_ERROR_COUNT:
+      g_value_set_uint64(value, self->error_count.load(std::memory_order_relaxed));
       break;
     case PROP_CAM:
       g_value_set_object(value, self->cam);
@@ -1059,6 +1076,8 @@ static gboolean gst_pylon_src_start(GstBaseSrc *src) {
   gboolean using_pfs = FALSE;
   gboolean same_device = TRUE;
 
+  self->error_count.store(0, std::memory_order_relaxed);
+
   GST_OBJECT_LOCK(self);
   same_device =
       self->pylon && gst_pylon_is_same_device(self->pylon, self->device_index,
@@ -1342,7 +1361,7 @@ static GstFlowReturn gst_pylon_src_create(GstPushSrc *src, GstBuffer **buf) {
 
   pylon_ret = gst_pylon_capture(
       self->pylon, buf, static_cast<GstPylonCaptureErrorEnum>(capture_error),
-      &error);
+      &self->error_count, &error);
 
   if (pylon_ret == FALSE) {
     if (error) {
