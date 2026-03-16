@@ -54,3 +54,13 @@ add_custom_target(gst-plugin-pylon ALL
 # Export the plugin location for use by other CMakeLists
 set(GST_PYLON_PLUGIN_PATH ${PYLON_INSTALL_DIR}/lib/gstreamer-1.0/gstpylonsrc.so PARENT_SCOPE)
 set(GST_PYLON_PLUGIN_DIR ${PYLON_INSTALL_DIR}/lib/gstreamer-1.0 PARENT_SCOPE)
+
+# Export include path for consuming plugins that need GstPylonMeta.
+# Use source headers directly - they are public API headers that don't need
+# the Pylon SDK to compile (only gst/pylon/gstpylonmeta.h and gstpylon-prelude.h).
+set(GST_PYLON_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/gst-libs PARENT_SCOPE)
+
+# Export the Meson build directory where libgstpylon-1.0.so is produced.
+# Consumers link against this library for GstPylonMeta API symbols.
+set(GST_PYLON_BUILD_LIB_DIR ${PYLON_BUILD_DIR}/gst-libs/gst/pylon PARENT_SCOPE)
+set(GST_PYLON_INSTALL_DIR ${PYLON_INSTALL_DIR} PARENT_SCOPE)

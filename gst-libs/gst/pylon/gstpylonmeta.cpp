@@ -46,6 +46,9 @@
 static gboolean gst_pylon_meta_init(GstMeta *meta, gpointer params,
                                     GstBuffer *buffer);
 static void gst_pylon_meta_free(GstMeta *meta, GstBuffer *buffer);
+static gboolean gst_pylon_meta_transform(GstBuffer *dest, GstMeta *meta,
+                                          GstBuffer *buffer, GQuark type,
+                                          gpointer data);
 static void gst_pylon_meta_add_chunk_as_meta(GstStructure *st,
                                              GenApi::INode *node,
                                              GenApi::INode *selector_node,
@@ -71,7 +74,8 @@ const GstMetaInfo *gst_pylon_meta_get_info(void) {
   if (g_once_init_enter(&info)) {
     const GstMetaInfo *meta = gst_meta_register(
         GST_PYLON_META_API_TYPE, "GstPylonMeta", sizeof(GstPylonMeta),
-        gst_pylon_meta_init, gst_pylon_meta_free, NULL);
+        gst_pylon_meta_init, gst_pylon_meta_free,
+        gst_pylon_meta_transform);
     g_once_init_leave(&info, meta);
   }
   return info;
@@ -207,6 +211,42 @@ void gst_buffer_add_pylon_meta(
   if (grab_result_ptr->IsChunkDataAvailable()) {
     gst_pylon_meta_fill_result_chunks(self, grab_result_ptr);
   }
+}
+
+static gboolean gst_pylon_meta_transform(GstBuffer *dest, GstMeta *meta,
+                                          GstBuffer *buffer, GQuark type,
+                                          gpointer data) {
+  GstPylonMeta *src_meta = (GstPylonMeta *)meta;
+
+  /* Copy meta to destination buffer on copy/transform operations.
+   * This ensures GstPylonMeta survives through elements like jpegdec,
+   * videoconvert, etc. that create new output buffers. */
+  if (GST_META_TRANSFORM_IS_COPY(type)) {
+    GstPylonMeta *dst_meta =
+        (GstPylonMeta *)gst_buffer_add_meta(dest, GST_PYLON_META_INFO, NULL);
+    if (!dst_meta) {
+      return FALSE;
+    }
+
+    dst_meta->block_id = src_meta->block_id;
+    dst_meta->image_number = src_meta->image_number;
+    dst_meta->skipped_images = src_meta->skipped_images;
+    dst_meta->offset = src_meta->offset;
+    dst_meta->timestamp = src_meta->timestamp;
+    dst_meta->stride = src_meta->stride;
+
+    /* Deep copy the chunks GstStructure */
+    if (src_meta->chunks) {
+      if (dst_meta->chunks) {
+        gst_structure_free(dst_meta->chunks);
+      }
+      dst_meta->chunks = gst_structure_copy(src_meta->chunks);
+    }
+
+    return TRUE;
+  }
+
+  return FALSE;
 }
 
 static gboolean gst_pylon_meta_init(GstMeta *meta, gpointer params,
