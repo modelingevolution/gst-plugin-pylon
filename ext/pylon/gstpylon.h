@@ -100,6 +100,8 @@ gboolean gst_pylon_configure_line2(GstPylon *self, gboolean illumination,
 
 gdouble gst_pylon_get_device_temperature(GstPylon *self, GError **err);
 
+void gst_pylon_device_reset(GstPylon *self);
+
 #ifdef NVMM_ENABLED
 void gst_pylon_set_nvsurface_layout(
     GstPylon *self, const GstPylonNvsurfaceLayoutEnum nvsurface_layout);

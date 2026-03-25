@@ -2243,3 +2243,21 @@ guint gst_pylon_get_gpu_id(GstPylon *self) {
   return self->gpu_id;
 }
 #endif
+
+void gst_pylon_device_reset(GstPylon *self) {
+  g_return_if_fail(self);
+  g_return_if_fail(self->camera);
+
+  try {
+    GenApi::INodeMap &nodemap = self->camera->GetNodeMap();
+    Pylon::CCommandParameter resetCmd(nodemap, "DeviceReset");
+    if (resetCmd.IsValid() && resetCmd.IsWritable()) {
+      GST_WARNING("Executing DeviceReset — camera will reboot");
+      resetCmd.Execute();
+    } else {
+      GST_ERROR("DeviceReset command not available or not writable");
+    }
+  } catch (const Pylon::GenericException &e) {
+    GST_ERROR("DeviceReset failed: %s", e.GetDescription());
+  }
+}

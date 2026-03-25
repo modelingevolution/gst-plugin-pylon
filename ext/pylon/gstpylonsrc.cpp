@@ -60,6 +60,9 @@
 #include <gst/video/video.h>
 
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 
 struct _GstPylonSrc {
   GstPushSrc base_pylonsrc;
@@ -85,6 +88,10 @@ struct _GstPylonSrc {
   gint sensor_offset_x;
   gint sensor_offset_y;
   std::atomic<guint64> error_count;
+  std::atomic<gint> restart_in_sec;
+  std::mutex restart_mutex;
+  std::condition_variable restart_cv;
+  std::atomic<bool> restart_cancel;
 
 #ifdef NVMM_ENABLED
   GstPylonNvsurfaceLayoutEnum nvsurface_layout;
@@ -135,6 +142,7 @@ enum {
   PROP_SENSOR_OFFSET_X,
   PROP_SENSOR_OFFSET_Y,
   PROP_ERROR_COUNT,
+  PROP_RESTART_IN_SEC,
 #ifdef NVMM_ENABLED
   PROP_NVSURFACE_LAYOUT,
   PROP_GPU_ID,
@@ -156,6 +164,7 @@ enum {
 #define PROP_STREAM_DEFAULT NULL
 #define PROP_CAPTURE_ERROR_DEFAULT ENUM_ABORT
 #define PROP_ILLUMINATION_DEFAULT FALSE
+#define PROP_RESTART_IN_SEC_DEFAULT -1
 #define PROP_SENSOR_OFFSET_X_DEFAULT 0
 #define PROP_SENSOR_OFFSET_Y_DEFAULT 0
 #ifdef NVMM_ENABLED
@@ -429,6 +438,17 @@ static void gst_pylon_src_class_init(GstPylonSrcClass *klass) {
           0, G_MAXUINT64, 0,
           static_cast<GParamFlags>(G_PARAM_READABLE | G_PARAM_STATIC_STRINGS)));
 
+  g_object_class_install_property(
+      gobject_class, PROP_RESTART_IN_SEC,
+      g_param_spec_int(
+          "restart-in-sec", "Restart In Seconds",
+          "Simulate camera disconnect by resetting the device after N seconds. "
+          "The camera hardware reboots, causing the grab loop to fail as if "
+          "the cable was unplugged. Set to -1 to disable (default). "
+          "Resets back to -1 after triggering.",
+          -1, 3600, PROP_RESTART_IN_SEC_DEFAULT,
+          static_cast<GParamFlags>(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+
 #ifdef NVMM_ENABLED
   g_object_class_install_property(
       gobject_class, PROP_NVSURFACE_LAYOUT,
@@ -530,6 +550,8 @@ static void gst_pylon_src_init(GstPylonSrc *self) {
   self->sensor_offset_x = PROP_SENSOR_OFFSET_X_DEFAULT;
   self->sensor_offset_y = PROP_SENSOR_OFFSET_Y_DEFAULT;
   self->error_count.store(0, std::memory_order_relaxed);
+  self->restart_in_sec.store(PROP_RESTART_IN_SEC_DEFAULT, std::memory_order_relaxed);
+  self->restart_cancel.store(false, std::memory_order_relaxed);
   gst_video_info_init(&self->video_info);
 #ifdef NVMM_ENABLED
   self->nvsurface_layout = PROP_NVSURFACE_LAYOUT_DEFAULT;
@@ -619,6 +641,46 @@ static void gst_pylon_src_set_property(GObject *object, guint property_id,
     case PROP_SENSOR_OFFSET_Y:
       self->sensor_offset_y = g_value_get_int(value);
       break;
+    case PROP_RESTART_IN_SEC:
+      {
+        gint delay = g_value_get_int(value);
+        gint prev = self->restart_in_sec.exchange(delay, std::memory_order_relaxed);
+
+        /* Cancel any pending reset timer */
+        if (prev >= 0) {
+          self->restart_cancel.store(true, std::memory_order_relaxed);
+          self->restart_cv.notify_all();
+        }
+
+        if (delay >= 0 && self->pylon) {
+          GstPylon *pylon = self->pylon;
+          self->restart_cancel.store(false, std::memory_order_relaxed);
+          GST_WARNING_OBJECT(self,
+              "Device reset scheduled in %d seconds — simulating cable disconnect",
+              delay);
+          GST_OBJECT_UNLOCK(self);
+          std::thread([pylon, delay, self]() {
+            if (delay > 0) {
+              std::unique_lock<std::mutex> lk(self->restart_mutex);
+              if (self->restart_cv.wait_for(lk, std::chrono::seconds(delay),
+                      [self]() { return self->restart_cancel.load(
+                                     std::memory_order_relaxed); })) {
+                GST_INFO_OBJECT(self, "Device reset cancelled");
+                return;
+              }
+            }
+            if (self->restart_cancel.load(std::memory_order_relaxed)) {
+              return;
+            }
+            GST_WARNING_OBJECT(self, "Executing DeviceReset now");
+            gst_pylon_device_reset(pylon);
+            self->restart_in_sec.store(PROP_RESTART_IN_SEC_DEFAULT,
+                                       std::memory_order_relaxed);
+          }).detach();
+          GST_OBJECT_LOCK(self);
+        }
+      }
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID(object, property_id, pspec);
       break;
@@ -701,6 +763,9 @@ static void gst_pylon_src_get_property(GObject *object, guint property_id,
     case PROP_ERROR_COUNT:
       g_value_set_uint64(value, self->error_count.load(std::memory_order_relaxed));
       break;
+    case PROP_RESTART_IN_SEC:
+      g_value_set_int(value, self->restart_in_sec.load(std::memory_order_relaxed));
+      break;
     case PROP_CAM:
       g_value_set_object(value, self->cam);
       break;
@@ -719,6 +784,10 @@ static void gst_pylon_src_finalize(GObject *object) {
   GstPylonSrc *self = GST_PYLON_SRC(object);
 
   GST_LOG_OBJECT(self, "finalize");
+
+  /* Cancel any pending device reset timer */
+  self->restart_cancel.store(true, std::memory_order_relaxed);
+  self->restart_cv.notify_all();
 
   g_free(self->device_user_name);
   self->device_user_name = NULL;
