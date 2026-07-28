@@ -85,6 +85,11 @@ struct _GstPylonSrc {
   GObject *cam;
   GObject *stream;
   gboolean illumination;
+  gint mode;
+  gboolean mode_explicitly_set;
+  gboolean illumination_explicitly_set;
+  gint active_profile;
+  std::atomic<guint> dropped_frames;
   gint sensor_offset_x;
   gint sensor_offset_y;
   std::atomic<guint64> error_count;
@@ -138,6 +143,9 @@ enum {
   PROP_CAM,
   PROP_STREAM,
   PROP_ILLUMINATION,
+  PROP_MODE,
+  PROP_ACTIVE_PROFILE,
+  PROP_DROPPED_FRAMES,
   PROP_DEVICE_TEMPERATURE,
   PROP_SENSOR_OFFSET_X,
   PROP_SENSOR_OFFSET_Y,
@@ -164,6 +172,10 @@ enum {
 #define PROP_STREAM_DEFAULT NULL
 #define PROP_CAPTURE_ERROR_DEFAULT ENUM_ABORT
 #define PROP_ILLUMINATION_DEFAULT FALSE
+#define PROP_MODE_DEFAULT GST_PYLON_MODE_ILLUMINATION
+#define PROP_ACTIVE_PROFILE_DEFAULT 0
+/* Line-1 debouncer for camera-slave mode (<= 5 us per design §2.3). */
+#define GST_PYLON_SLAVE_LINE_DEBOUNCER_US 5.0
 #define PROP_RESTART_IN_SEC_DEFAULT -1
 #define PROP_SENSOR_OFFSET_X_DEFAULT 0
 #define PROP_SENSOR_OFFSET_Y_DEFAULT 0
@@ -171,6 +183,35 @@ enum {
 #  define PROP_GPU_ID_MIN 0
 #  define PROP_GPU_ID_MAX G_MAXUINT32
 #endif
+
+/* epic-060 operation mode */
+typedef enum {
+  GST_PYLON_MODE_NON_ILLUMINATION = 0,
+  GST_PYLON_MODE_ILLUMINATION = 1,
+  GST_PYLON_MODE_CAMERA_SLAVE = 2,
+} GstPylonModeEnum;
+
+#define GST_TYPE_PYLON_MODE_ENUM (gst_pylon_mode_enum_get_type())
+
+static GType gst_pylon_mode_enum_get_type(void) {
+  static gsize gtype = 0;
+  static const GEnumValue values[] = {
+      {GST_PYLON_MODE_NON_ILLUMINATION, "non-illumination",
+       "No external illumination control; camera lines left as inputs."},
+      {GST_PYLON_MODE_ILLUMINATION, "illumination",
+       "Camera-driven illumination via Line2/Line3 (ExposureActive)."},
+      {GST_PYLON_MODE_CAMERA_SLAVE, "camera-slave",
+       "External Line-1 trigger-width HDR (Pico); exposure comes from the "
+       "trigger pulse width and is classified against the expected exposures."},
+      {0, NULL, NULL}};
+
+  if (g_once_init_enter(&gtype)) {
+    GType tmp = g_enum_register_static("GstPylonModeEnum", values);
+    g_once_init_leave(&gtype, tmp);
+  }
+
+  return (GType)gtype;
+}
 
 /* Enum for cature_error */
 #define GST_TYPE_CAPTURE_ERROR_ENUM (gst_pylon_capture_error_enum_get_type())
@@ -401,6 +442,41 @@ static void gst_pylon_src_class_init(GstPylonSrcClass *klass) {
                                    GST_PARAM_MUTABLE_READY)));
 
   g_object_class_install_property(
+      gobject_class, PROP_MODE,
+      g_param_spec_enum(
+          "mode", "Operation mode",
+          "Camera operation mode: non-illumination (0), illumination (1), "
+          "camera-slave (2). camera-slave uses an external Line-1 trigger-width "
+          "source (Pico) to drive HDR. When set explicitly this overrides the "
+          "legacy 'illumination' boolean; leaving it unset lets 'illumination' "
+          "decide (true->illumination, false->non-illumination). Setting both "
+          "inconsistently is an error at start().",
+          GST_TYPE_PYLON_MODE_ENUM, PROP_MODE_DEFAULT,
+          static_cast<GParamFlags>(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+                                   GST_PARAM_MUTABLE_READY)));
+
+  g_object_class_install_property(
+      gobject_class, PROP_ACTIVE_PROFILE,
+      g_param_spec_int(
+          "active-profile", "Active HDR Profile (camera-slave)",
+          "Authoritative classifier profile (0 or 1) for camera-slave mode. "
+          "Driven by rocketdriver-target after the Pico confirms APPLY=OK. "
+          "Ignored outside camera-slave mode.",
+          0, 1, PROP_ACTIVE_PROFILE_DEFAULT,
+          static_cast<GParamFlags>(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+                                   GST_PARAM_MUTABLE_PLAYING)));
+
+  g_object_class_install_property(
+      gobject_class, PROP_DROPPED_FRAMES,
+      g_param_spec_uint(
+          "dropped-frames", "Dropped Frames (camera-slave)",
+          "Number of frames dropped in camera-slave mode because their measured "
+          "exposure did not match any active-profile exposure within tolerance "
+          "(read-only). Reset when the element restarts.",
+          0, G_MAXUINT, 0,
+          static_cast<GParamFlags>(G_PARAM_READABLE | G_PARAM_STATIC_STRINGS)));
+
+  g_object_class_install_property(
       gobject_class, PROP_DEVICE_TEMPERATURE,
       g_param_spec_double(
           "device-temperature", "Device Temperature",
@@ -547,6 +623,11 @@ static void gst_pylon_src_init(GstPylonSrc *self) {
   self->cam = PROP_CAM_DEFAULT;
   self->stream = PROP_STREAM_DEFAULT;
   self->illumination = PROP_ILLUMINATION_DEFAULT;
+  self->mode = PROP_MODE_DEFAULT;
+  self->mode_explicitly_set = FALSE;
+  self->illumination_explicitly_set = FALSE;
+  self->active_profile = PROP_ACTIVE_PROFILE_DEFAULT;
+  self->dropped_frames.store(0, std::memory_order_relaxed);
   self->sensor_offset_x = PROP_SENSOR_OFFSET_X_DEFAULT;
   self->sensor_offset_y = PROP_SENSOR_OFFSET_Y_DEFAULT;
   self->error_count.store(0, std::memory_order_relaxed);
@@ -634,7 +715,23 @@ static void gst_pylon_src_set_property(GObject *object, guint property_id,
 #endif
     case PROP_ILLUMINATION:
       self->illumination = g_value_get_boolean(value);
+      self->illumination_explicitly_set = TRUE;
       break;
+    case PROP_MODE:
+      self->mode = g_value_get_enum(value);
+      self->mode_explicitly_set = TRUE;
+      break;
+    case PROP_ACTIVE_PROFILE: {
+      gint profile = g_value_get_int(value);
+      self->active_profile = profile;
+      /* Publish to the live classifier (§2.5). SetActiveProfile only stores an
+       * atomic pending value, safe to call from the target's worker thread. */
+      if (self->hdr_plugin) {
+        self->hdr_plugin->SetActiveProfile(profile);
+      }
+      GST_INFO_OBJECT(self, "Camera-slave active-profile set to %d", profile);
+      break;
+    }
     case PROP_SENSOR_OFFSET_X:
       self->sensor_offset_x = g_value_get_int(value);
       break;
@@ -739,6 +836,16 @@ static void gst_pylon_src_get_property(GObject *object, guint property_id,
 #endif
     case PROP_ILLUMINATION:
       g_value_set_boolean(value, self->illumination);
+      break;
+    case PROP_MODE:
+      g_value_set_enum(value, self->mode);
+      break;
+    case PROP_ACTIVE_PROFILE:
+      g_value_set_int(value, self->active_profile);
+      break;
+    case PROP_DROPPED_FRAMES:
+      g_value_set_uint(value,
+                       self->dropped_frames.load(std::memory_order_relaxed));
       break;
     case PROP_DEVICE_TEMPERATURE: {
       GError *error = NULL;
@@ -978,6 +1085,7 @@ static gboolean gst_pylon_src_set_caps(GstBaseSrc *src, GstCaps *caps) {
   GError *error = NULL;
   gboolean ret = FALSE;
   const gchar *action = NULL;
+  gint mode = GST_PYLON_MODE_ILLUMINATION;
 
   GST_INFO_OBJECT(self, "Setting new caps: %" GST_PTR_FORMAT, caps);
 
@@ -1015,8 +1123,74 @@ static gboolean gst_pylon_src_set_caps(GstBaseSrc *src, GstCaps *caps) {
     goto log_error;
   }
 
-  /* Configure HDR sequence if specified */
-  if (self->hdr_sequence && strlen(self->hdr_sequence) > 0) {
+  GST_OBJECT_LOCK(self);
+  mode = self->mode;
+  GST_OBJECT_UNLOCK(self);
+
+  /* epic-060: camera-slave replaces the internal-sequencer configuration with a
+   * Line-1 trigger-width setup; the same hdr-sequence/hdr-sequence2 lists become
+   * the classifier's expected exposures (NOT written to a camera sequencer). */
+  if (mode == GST_PYLON_MODE_CAMERA_SLAVE) {
+    if (!self->hdr_sequence || strlen(self->hdr_sequence) == 0) {
+      error_msg = g_strdup(
+          "camera-slave mode requires hdr-sequence (expected exposures for "
+          "classification)");
+      action = "configure camera-slave";
+      goto error;
+    }
+
+    std::vector<guint32> profile0_exposures;
+    std::vector<guint32> profile1_exposures;
+    std::vector<guint32> adjusted0, adjusted1;
+
+    {
+      gchar **exposures = g_strsplit(self->hdr_sequence, ",", -1);
+      for (int i = 0; exposures[i]; i++) {
+        profile0_exposures.push_back(g_ascii_strtoull(exposures[i], NULL, 10));
+      }
+      g_strfreev(exposures);
+    }
+    if (self->hdr_sequence2 && strlen(self->hdr_sequence2) > 0) {
+      gchar **exposures = g_strsplit(self->hdr_sequence2, ",", -1);
+      for (int i = 0; exposures[i]; i++) {
+        profile1_exposures.push_back(g_ascii_strtoull(exposures[i], NULL, 10));
+      }
+      g_strfreev(exposures);
+    }
+
+    /* Provision the live classifier with the expected exposures. */
+    if (!self->hdr_plugin->Configure(profile0_exposures, profile1_exposures,
+                                     adjusted0, adjusted1)) {
+      error_msg = g_strdup("Failed to configure HDR classifier for camera-slave");
+      action = "configure camera-slave";
+      goto error;
+    }
+
+    /* Apply the pending active-profile (may have been set before caps). */
+    self->hdr_plugin->SetActiveProfile(self->active_profile);
+
+    /* Enable chunks so ChunkExposureTime flows for classification. */
+    gst_pylon_src_enable_hdr_chunks(self);
+
+    /* Grab timeout = 3x the frame period derived from the negotiated
+     * framerate; 0 (unknown framerate) leaves the wait unbounded. */
+    gint64 grab_timeout_us = 0;
+    GST_OBJECT_LOCK(self);
+    GstClockTime period_ns = self->duration;
+    GST_OBJECT_UNLOCK(self);
+    if (period_ns != GST_CLOCK_TIME_NONE && period_ns > 0) {
+      grab_timeout_us = 3 * static_cast<gint64>(period_ns / 1000);
+    }
+
+    ret = gst_pylon_configure_camera_slave(
+        self->pylon, GST_PYLON_SLAVE_LINE_DEBOUNCER_US, grab_timeout_us, &error);
+    if (ret) {
+      GST_INFO_OBJECT(self, "Camera-slave mode configured successfully");
+    } else {
+      action = "configure camera-slave";
+      goto log_error;
+    }
+  } else if (self->hdr_sequence && strlen(self->hdr_sequence) > 0) {
     // Parse sequences
     std::vector<guint32> profile0_exposures;
     std::vector<guint32> profile1_exposures;
@@ -1146,6 +1320,55 @@ static gboolean gst_pylon_src_start(GstBaseSrc *src) {
   gboolean same_device = TRUE;
 
   self->error_count.store(0, std::memory_order_relaxed);
+  self->dropped_frames.store(0, std::memory_order_relaxed);
+
+  /* Resolve the effective operation mode from the 'mode' enum and the legacy
+   * 'illumination' boolean (§2.2). Explicit 'mode' wins; otherwise the boolean
+   * decides; setting both inconsistently is a fatal error. */
+  {
+    gboolean mode_set = FALSE;
+    gboolean illum_set = FALSE;
+    gboolean illum_val = FALSE;
+    gint mode_val = GST_PYLON_MODE_ILLUMINATION;
+    gint effective = GST_PYLON_MODE_ILLUMINATION;
+
+    GST_OBJECT_LOCK(self);
+    mode_set = self->mode_explicitly_set;
+    illum_set = self->illumination_explicitly_set;
+    illum_val = self->illumination;
+    mode_val = self->mode;
+    GST_OBJECT_UNLOCK(self);
+
+    if (mode_set && illum_set) {
+      gint implied = illum_val ? GST_PYLON_MODE_ILLUMINATION
+                               : GST_PYLON_MODE_NON_ILLUMINATION;
+      if (mode_val != implied) {
+        GST_ELEMENT_ERROR(
+            self, LIBRARY, SETTINGS,
+            ("Conflicting 'mode' and 'illumination' properties."),
+            ("mode=%d but illumination=%s imply different modes", mode_val,
+             illum_val ? "true" : "false"));
+        return FALSE;
+      }
+      effective = mode_val;
+    } else if (mode_set) {
+      effective = mode_val;
+    } else if (illum_set) {
+      effective = illum_val ? GST_PYLON_MODE_ILLUMINATION
+                            : GST_PYLON_MODE_NON_ILLUMINATION;
+    } else {
+      effective = PROP_MODE_DEFAULT;
+    }
+
+    GST_OBJECT_LOCK(self);
+    self->mode = effective;
+    /* Keep the boolean consistent so the line-config path stays exact for the
+     * illumination / non-illumination modes. */
+    self->illumination = (effective == GST_PYLON_MODE_ILLUMINATION);
+    GST_OBJECT_UNLOCK(self);
+
+    GST_INFO_OBJECT(self, "Effective operation mode: %d", effective);
+  }
 
   GST_OBJECT_LOCK(self);
   same_device =
@@ -1221,8 +1444,10 @@ static gboolean gst_pylon_src_start(GstBaseSrc *src) {
     goto log_gst_error;
   }
 
-  /* Configure Line2 and Line3 for illumination control using Pylon API */
-  if (self->pylon) {
+  /* Configure Line2 and Line3 for illumination control using Pylon API.
+   * camera-slave mode configures its own lines later in set_caps (Pico owns the
+   * illuminator), so skip the illumination line setup here. */
+  if (self->pylon && self->mode != GST_PYLON_MODE_CAMERA_SLAVE) {
     GError *line_err = NULL;
     GST_INFO_OBJECT(self, "Configuring Line2 and Line3 for illumination=%d", self->illumination);
     if (!gst_pylon_configure_line2(self->pylon, self->illumination, &line_err)) {
@@ -1410,9 +1635,11 @@ static GstFlowReturn gst_pylon_src_create(GstPushSrc *src, GstBuffer **buf) {
   gboolean pylon_ret = TRUE;
   GstFlowReturn ret = GST_FLOW_OK;
   gint capture_error = -1;
+  gint mode = GST_PYLON_MODE_ILLUMINATION;
 
   GST_OBJECT_LOCK(self);
   capture_error = self->capture_error;
+  mode = self->mode;
   GST_OBJECT_UNLOCK(self);
 
   // Check if we need to send profile switch signals
@@ -1428,6 +1655,9 @@ static GstFlowReturn gst_pylon_src_create(GstPushSrc *src, GstBuffer **buf) {
     }
   }
 
+  /* Slave mode re-grabs frames whose exposure does not classify (§2.4); other
+   * modes run this body exactly once (break at the end). */
+  while (TRUE) {
   pylon_ret = gst_pylon_capture(
       self->pylon, buf, static_cast<GstPylonCaptureErrorEnum>(capture_error),
       &self->error_count, &error);
@@ -1449,8 +1679,61 @@ static GstFlowReturn gst_pylon_src_create(GstPushSrc *src, GstBuffer **buf) {
 
   gst_plyon_src_add_metadata(self, *buf);
 
-  // Process and attach HDR metadata if configured
-  if (self->hdr_plugin && self->hdr_plugin->IsConfigured()) {
+  /* epic-060 camera-slave: classify by measured ChunkExposureTime and attach
+   * GstHdrMeta, or DROP the frame. Nothing meta-less may reach the sortingbuffer
+   * (which hard-errors on a meta-less buffer), so this guard also covers the
+   * no-chunk / exposure==0 path (§2.4). */
+  if (mode == GST_PYLON_MODE_CAMERA_SLAVE) {
+    gboolean drop = TRUE;
+
+    if (self->hdr_plugin && self->hdr_plugin->IsConfigured()) {
+      GstPylonMeta *pylon_meta = gst_buffer_get_pylon_meta(*buf);
+      guint32 exposure_time = 0;
+
+      if (pylon_meta && pylon_meta->chunks) {
+        gdouble chunk_exposure = 0;
+        if (gst_structure_get_double(pylon_meta->chunks, "ChunkExposureTime",
+                                     &chunk_exposure) ||
+            gst_structure_get_double(pylon_meta->chunks, "ChunkExposureTimeAbs",
+                                     &chunk_exposure)) {
+          exposure_time = (guint32)chunk_exposure;
+        }
+      }
+
+      if (exposure_time > 0) {
+        HdrMetadataPlugin::SlaveResult result =
+            self->hdr_plugin->ProcessAndAttachMetadataSlave(*buf, exposure_time);
+        if (result == HdrMetadataPlugin::SlaveResult::Attached) {
+          drop = FALSE;
+        } else if (result == HdrMetadataPlugin::SlaveResult::Dropped) {
+          GST_LOG_OBJECT(self,
+                         "camera-slave: exposure %u us out of tolerance, "
+                         "dropping frame",
+                         exposure_time);
+        } else {
+          GST_WARNING_OBJECT(
+              self, "camera-slave: classifier error, dropping frame");
+        }
+      } else {
+        GST_DEBUG_OBJECT(
+            self, "camera-slave: no ChunkExposureTime available, dropping frame");
+      }
+    } else {
+      GST_WARNING_OBJECT(self,
+                         "camera-slave: HDR classifier not configured, "
+                         "dropping frame");
+    }
+
+    if (drop) {
+      /* GstBaseSrc has no "dropped" flow return, so re-grab the next triggered
+       * frame in place instead of pushing a meta-less/mismatched buffer. */
+      self->dropped_frames.fetch_add(1, std::memory_order_relaxed);
+      gst_buffer_unref(*buf);
+      *buf = NULL;
+      continue;
+    }
+    break;
+  } else if (self->hdr_plugin && self->hdr_plugin->IsConfigured()) {
     // Get frame number and exposure time from buffer metadata
     GstPylonMeta *pylon_meta = gst_buffer_get_pylon_meta(*buf);
     if (pylon_meta) {
@@ -1485,7 +1768,13 @@ static GstFlowReturn gst_pylon_src_create(GstPushSrc *src, GstBuffer **buf) {
                         frame_number);
       }
     }
+    break;
+  } else {
+    /* No HDR classification in this mode: push the frame as-is (unchanged
+     * illumination / non-illumination behavior). */
+    break;
   }
+  } /* while (TRUE): camera-slave re-grabs dropped frames */
 
   GST_LOG_OBJECT(self, "Created buffer %" GST_PTR_FORMAT, *buf);
 

@@ -91,6 +91,62 @@ HdrMetadataPlugin::ProcessAndAttachMetadata(GstBuffer* buffer,
     }
 }
 
+HdrMetadataPlugin::SlaveResult
+HdrMetadataPlugin::ProcessAndAttachMetadataSlave(GstBuffer* buffer,
+                                                 guint32 exposure_time) {
+    if (!is_configured_ || !provider_) {
+        GST_WARNING("HDR metadata plugin not configured");
+        return SlaveResult::Error;
+    }
+
+    if (!buffer) {
+        GST_ERROR("Invalid buffer");
+        return SlaveResult::Error;
+    }
+
+    try {
+        HdrMetadata::HdrMetadata hdr_meta;
+        if (!provider_->ProcessFrameSlave(exposure_time, hdr_meta)) {
+            // No exposure matched the active profile within tolerance -> drop.
+            GST_LOG("Camera-slave: exposure %u us did not match active profile "
+                    "-> drop", exposure_time);
+            return SlaveResult::Dropped;
+        }
+
+        GstHdrMeta* meta = gst_buffer_add_hdr_meta(
+            buffer,
+            hdr_meta.MasterSequence,
+            hdr_meta.ExposureSequenceIndex,
+            hdr_meta.ExposureCount,
+            hdr_meta.ExposureValue,
+            hdr_meta.HdrProfile
+        );
+
+        if (!meta) {
+            GST_ERROR("Failed to attach HDR metadata to buffer");
+            return SlaveResult::Error;
+        }
+
+        GST_LOG("Camera-slave HDR metadata: master=%lu, profile=%d, "
+                "exp_idx=%d/%d, exp_value=%u",
+                hdr_meta.MasterSequence, hdr_meta.HdrProfile,
+                hdr_meta.ExposureSequenceIndex, hdr_meta.ExposureCount,
+                hdr_meta.ExposureValue);
+
+        return SlaveResult::Attached;
+    } catch (const std::exception& e) {
+        GST_ERROR("Failed to process HDR metadata (slave): %s", e.what());
+        return SlaveResult::Error;
+    }
+}
+
+void
+HdrMetadataPlugin::SetActiveProfile(gint profile) {
+    if (provider_) {
+        provider_->SetActiveProfile(profile);
+    }
+}
+
 gboolean
 HdrMetadataPlugin::IsConfigured() const {
     return is_configured_;

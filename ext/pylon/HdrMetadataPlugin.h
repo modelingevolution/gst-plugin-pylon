@@ -29,6 +29,15 @@ namespace HdrMetadata {
  */
 class HdrMetadataPlugin {
 public:
+    /**
+     * Result of camera-slave classification (epic-060 §2.4).
+     */
+    enum class SlaveResult {
+        Attached,  /**< GstHdrMeta attached, push the buffer */
+        Dropped,   /**< No exposure matched the active profile -> drop the frame */
+        Error      /**< Not configured / internal error -> drop the frame */
+    };
+
     HdrMetadataPlugin();
     ~HdrMetadataPlugin();
 
@@ -55,6 +64,25 @@ public:
     gboolean ProcessAndAttachMetadata(GstBuffer* buffer,
                                       guint64 frame_number,
                                       guint32 exposure_time);
+
+    /**
+     * Process frame and attach HDR metadata in camera-slave mode (epic-060).
+     * Uses nearest-match classification scoped to the active profile and never
+     * throws. A non-matching exposure yields SlaveResult::Dropped so the caller
+     * can drop the frame instead of pushing a meta-less buffer.
+     * @param buffer GStreamer buffer to attach metadata to
+     * @param exposure_time Measured exposure time in microseconds (chunk data)
+     * @return classification result
+     */
+    SlaveResult ProcessAndAttachMetadataSlave(GstBuffer* buffer,
+                                              guint32 exposure_time);
+
+    /**
+     * Set the authoritative classification profile for camera-slave mode (§2.5).
+     * Safe to call from a thread other than the streaming thread.
+     * @param profile Profile index (0 or 1)
+     */
+    void SetActiveProfile(gint profile);
 
     /**
      * Check if HDR is configured

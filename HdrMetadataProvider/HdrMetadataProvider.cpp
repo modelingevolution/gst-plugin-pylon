@@ -80,6 +80,98 @@ HdrMetadata HdrMetadataProvider::ProcessFrame(uint64_t frameNumber, uint32_t act
     return metadata;
 }
 
+void HdrMetadataProvider::SetActiveProfile(int profile) {
+    // Clamp to a valid profile index and publish for ProcessFrameSlave to
+    // consume between frames (§2.5, R2-MA-4). Lock-free, no _last* write here.
+    _pendingActiveProfile.store(profile == 1 ? 1 : 0, std::memory_order_release);
+}
+
+bool HdrMetadataProvider::ProcessFrameSlave(uint32_t actualExposureTime,
+                                            HdrMetadata& out) {
+    // Consume the authoritative pending profile between frames (§2.5). A profile
+    // change forces a fresh window so windows from different profiles never
+    // merge in the sortingbuffer.
+    const int pending = _pendingActiveProfile.load(std::memory_order_acquire);
+    const uint8_t profile = (pending == 1) ? 1 : 0;
+    if (profile != _activeProfile) {
+        _activeProfile = profile;
+        _forceNewWindow = true;
+    }
+
+    const ProfileInfo& p = GetProfile(_activeProfile);
+    const uint8_t windowSize = p.WindowSize();
+    if (windowSize == 0) {
+        // Active profile not configured with expected exposures -> cannot
+        // classify, signal a drop.
+        return false;
+    }
+
+    // Nearest-match over the ACTIVE profile's exposures only (§2.4).
+    uint8_t bestIndex = 0;
+    uint32_t bestDistance = UINT32_MAX;
+    for (uint8_t i = 0; i < windowSize; i++) {
+        const uint32_t exposure = p.Exposures[i];
+        const uint32_t distance = (actualExposureTime >= exposure)
+                                      ? (actualExposureTime - exposure)
+                                      : (exposure - actualExposureTime);
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            bestIndex = i;
+        }
+    }
+
+    // Tolerance = 0.4 * nearest-neighbor gap of the matched exposure. For a
+    // single-exposure profile there is no neighbor, so any measured exposure is
+    // accepted (count=1 window). Always < 0.5*gap => classes never overlap.
+    if (windowSize >= 2) {
+        uint32_t nearestNeighborGap = UINT32_MAX;
+        const uint32_t matched = p.Exposures[bestIndex];
+        for (uint8_t j = 0; j < windowSize; j++) {
+            if (j == bestIndex) {
+                continue;
+            }
+            const uint32_t other = p.Exposures[j];
+            const uint32_t gap =
+                (matched >= other) ? (matched - other) : (other - matched);
+            if (gap < nearestNeighborGap) {
+                nearestNeighborGap = gap;
+            }
+        }
+        const double tolerance = 0.4 * static_cast<double>(nearestNeighborGap);
+        if (static_cast<double>(bestDistance) > tolerance) {
+            // Outside tolerance (typically an in-flight frame from the previous
+            // profile after a switch) -> drop.
+            return false;
+        }
+    }
+
+    const uint8_t setIndex = bestIndex;
+
+    // Windowing by set-index wrap counter (§2.5). master_sequence increments
+    // whenever the set index cycles back toward zero within the active profile,
+    // or when the profile just switched. Drop-robust and independent of
+    // image_number. Continuous across profile switches so it stays globally
+    // monotonic for the sortingbuffer.
+    if (!_slaveInitialized) {
+        _slaveInitialized = true;
+        _slaveMasterSequence = 1;
+    } else if (_forceNewWindow || setIndex <= _lastSlaveSetIndex) {
+        _slaveMasterSequence++;
+    }
+    _forceNewWindow = false;
+    _lastSlaveSetIndex = setIndex;
+
+    out.MasterSequence = _slaveMasterSequence;
+    out.ExposureSequenceIndex = setIndex;
+    out.ExposureCount = windowSize;
+    out.ExposureValue = actualExposureTime;
+    out.HdrProfile = _activeProfile;
+
+    _lastProfile = _activeProfile;
+
+    return true;
+}
+
 void HdrMetadataProvider::CalculateFrameOffset(uint64_t n, const ProfileInfo& prv,
                                                const ProfileInfo& nx, uint8_t sequenceIndex) {
     auto prv_m = prv.GetMasterSequence(static_cast<int64_t>(n) + _frameOffset);

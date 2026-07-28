@@ -7,6 +7,7 @@
 #include <memory>
 #include <stdexcept>
 #include <utility>
+#include <atomic>
 
 namespace HdrMetadata {
 
@@ -27,8 +28,24 @@ public:
         std::vector<uint32_t>& adjustedProfile0,
         std::vector<uint32_t>& adjustedProfile1);
 
-    // Process a frame and return its HDR metadata
+    // Process a frame and return its HDR metadata (internal-sequencer mode).
+    // Uses the exact exposure map and throws on an unknown exposure.
     HdrMetadata ProcessFrame(uint64_t frameNumber, uint32_t actualExposureTime);
+
+    // Process a frame in camera-slave mode (epic-060 §2.4/§2.5). The exposure is
+    // measured (ChunkExposureTime) so it never matches the commanded value
+    // exactly. Classification is a nearest-match over the ACTIVE profile's
+    // exposures only, windowing derives from a per-profile set-index wrap
+    // counter (bypasses CalculateFrameOffset/GetMasterSequence). Returns false
+    // (no-match / not configured) to signal that the frame MUST be dropped;
+    // never throws.
+    bool ProcessFrameSlave(uint32_t actualExposureTime, HdrMetadata& out);
+
+    // Camera-slave mode: set the authoritative classification profile (§2.5).
+    // Stored as an atomic pending-profile consumed at the top of
+    // ProcessFrameSlave; safe to call from another thread than the one running
+    // ProcessFrameSlave.
+    void SetActiveProfile(int profile);
 
     // Get the current/last profile being processed
     int GetCurrentProfile() const { return _lastProfile; }
@@ -73,6 +90,16 @@ private:
     uint8_t _lastSequenceIndex = 0;
     uint64_t _lastFrameNumber = UINT64_MAX;
     int64_t _frameOffset = 0;
+
+    // Camera-slave mode state (epic-060). The pending profile is written from a
+    // foreign thread (rocketdriver-target worker) and consumed at the top of
+    // ProcessFrameSlave; the rest is only touched on the streaming thread.
+    std::atomic<int> _pendingActiveProfile{0};
+    uint8_t _activeProfile = 0;
+    uint64_t _slaveMasterSequence = 0;
+    int _lastSlaveSetIndex = -1;
+    bool _slaveInitialized = false;
+    bool _forceNewWindow = false;
 };
 
 } // namespace HdrMetadata

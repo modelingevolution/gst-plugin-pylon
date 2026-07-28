@@ -32,6 +32,8 @@
 
 #include "gstpylonimagehandler.h"
 
+#include <chrono>
+
 GstPylonImageHandler::GstPylonImageHandler()
     : ptr_grab_result(NULL), grab_result_ready(false) {}
 
@@ -49,10 +51,28 @@ void GstPylonImageHandler::OnImageGrabbed(
   this->grab_result_cv.notify_one();
 }
 
-Pylon::CBaslerUniversalGrabResultPtr *GstPylonImageHandler::WaitForImage() {
+Pylon::CBaslerUniversalGrabResultPtr *GstPylonImageHandler::WaitForImage(
+    gint64 timeout_us, bool *timed_out) {
+  if (timed_out) {
+    *timed_out = false;
+  }
+
   std::unique_lock<std::mutex> mutex_lock(this->grab_result_mutex);
-  this->grab_result_cv.wait(mutex_lock,
-                            [this] { return this->grab_result_ready; });
+  if (timeout_us <= 0) {
+    /* Unbounded wait — default behavior for non-slave modes. */
+    this->grab_result_cv.wait(mutex_lock,
+                              [this] { return this->grab_result_ready; });
+  } else {
+    /* Bounded wait — camera-slave mode detects a lost external trigger. */
+    if (!this->grab_result_cv.wait_for(
+            mutex_lock, std::chrono::microseconds(timeout_us),
+            [this] { return this->grab_result_ready; })) {
+      if (timed_out) {
+        *timed_out = true;
+      }
+      return NULL;
+    }
+  }
   Pylon::CBaslerUniversalGrabResultPtr *grab_result = this->ptr_grab_result;
   this->ptr_grab_result = NULL;
   this->grab_result_ready = false;

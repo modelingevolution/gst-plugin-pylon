@@ -140,6 +140,11 @@ struct _GstPylon {
   std::string requested_device_serial_number;
   gint requested_device_index;
 
+  /* epic-060 camera-slave mode: external Line-1 trigger-width HDR. */
+  gboolean slave_mode = FALSE;
+  gint64 slave_grab_timeout_us = 0; /* 0 => unbounded (non-slave) */
+  gint slave_miss_count = 0;
+
 #ifdef NVMM_ENABLED
   GstPylonNvsurfaceLayoutEnum nvsurface_layout;
   guint gpu_id;
@@ -1315,7 +1320,12 @@ gboolean gst_pylon_start(GstPylon *self, GError **err) {
   g_return_val_if_fail(err && *err == NULL, FALSE);
 
   try {
-    self->camera->StartGrabbing(Pylon::GrabStrategy_LatestImageOnly,
+    /* epic-060 R2-MA-2: camera-slave grabs OneByOne (FIFO) so trigger drops
+     * are uniform/bounded; other modes keep LatestImageOnly. */
+    const Pylon::EGrabStrategy strategy =
+        self->slave_mode ? Pylon::GrabStrategy_OneByOne
+                         : Pylon::GrabStrategy_LatestImageOnly;
+    self->camera->StartGrabbing(strategy,
                                 Pylon::GrabLoop_ProvidedByInstantCamera);
   } catch (const Pylon::GenericException &e) {
     g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED, "%s",
@@ -1381,13 +1391,39 @@ gboolean gst_pylon_capture(GstPylon *self, GstBuffer **buf,
   static const gint max_frames_to_skip = G_MAXINT - 16;
   Pylon::CBaslerUniversalGrabResultPtr *grab_result_ptr = NULL;
 
-  while (retry_grab) {
-    grab_result_ptr = self->image_handler.WaitForImage();
+  /* epic-060: escalate to a fatal error after this many consecutive grab
+   * timeouts in camera-slave mode (external trigger lost). */
+  static const gint slave_miss_threshold = 3;
 
-    /* Return if user requests to interrupt the grabbing thread */
+  while (retry_grab) {
+    bool timed_out = false;
+    grab_result_ptr =
+        self->image_handler.WaitForImage(self->slave_grab_timeout_us, &timed_out);
+
+    /* Return if user requests to interrupt the grabbing thread, or (slave mode)
+     * escalate on a lost external trigger. */
     if (!grab_result_ptr) {
+      if (timed_out) {
+        self->slave_miss_count += 1;
+        if (self->slave_miss_count >= slave_miss_threshold) {
+          g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
+                      "No external trigger: %d consecutive grab timeouts "
+                      "(%" G_GINT64_FORMAT " us each). Pico disarmed or link lost.",
+                      self->slave_miss_count, self->slave_grab_timeout_us);
+          return FALSE;
+        }
+        GST_ELEMENT_WARNING(self->gstpylonsrc, RESOURCE, READ,
+                            ("No external trigger frame within timeout."),
+                            ("grab timeout %d/%d (%" G_GINT64_FORMAT " us)",
+                             self->slave_miss_count, slave_miss_threshold,
+                             self->slave_grab_timeout_us));
+        continue;
+      }
       return FALSE;
     }
+
+    /* A frame arrived: the external trigger is alive again. */
+    self->slave_miss_count = 0;
 
     if ((*grab_result_ptr)->GrabSucceeded()) {
       break;
@@ -2185,6 +2221,106 @@ gboolean gst_pylon_configure_line2(GstPylon *self, gboolean illumination,
   } catch (const Pylon::GenericException &e) {
     g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
                 "Pylon error configuring illumination lines: %s", e.GetDescription());
+    return FALSE;
+  }
+}
+
+gboolean gst_pylon_configure_camera_slave(GstPylon *self,
+                                          gdouble line_debouncer_us,
+                                          gint64 grab_timeout_us, GError **err) {
+  g_return_val_if_fail(self, FALSE);
+  g_return_val_if_fail(err && *err == NULL, FALSE);
+
+  try {
+    auto &camera = self->camera;
+    if (!camera || !camera->IsOpen()) {
+      g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
+                  "Camera is not open");
+      return FALSE;
+    }
+
+    GST_INFO("Configuring camera-slave mode (Line-1 trigger-width, "
+             "debouncer=%.2f us, grab-timeout=%" G_GINT64_FORMAT " us)",
+             line_debouncer_us, grab_timeout_us);
+
+    /* FrameStart triggered by the rising edge of Line 1. */
+    if (!GenApi::IsWritable(camera->TriggerSelector)) {
+      g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
+                  "TriggerSelector is not writable");
+      return FALSE;
+    }
+    camera->TriggerSelector.SetValue(
+        Basler_UniversalCameraParams::TriggerSelector_FrameStart);
+
+    if (!GenApi::IsWritable(camera->TriggerMode)) {
+      g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
+                  "TriggerMode is not writable");
+      return FALSE;
+    }
+    camera->TriggerMode.SetValue(Basler_UniversalCameraParams::TriggerMode_On);
+
+    if (!GenApi::IsWritable(camera->TriggerSource)) {
+      g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
+                  "TriggerSource is not writable");
+      return FALSE;
+    }
+    camera->TriggerSource.SetValue(
+        Basler_UniversalCameraParams::TriggerSource_Line1);
+
+    if (!GenApi::IsWritable(camera->TriggerActivation)) {
+      g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
+                  "TriggerActivation is not writable");
+      return FALSE;
+    }
+    camera->TriggerActivation.SetValue(
+        Basler_UniversalCameraParams::TriggerActivation_RisingEdge);
+
+    /* Exposure equals the Line-1 pulse width. */
+    if (!GenApi::IsWritable(camera->ExposureMode)) {
+      g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
+                  "ExposureMode is not writable");
+      return FALSE;
+    }
+    camera->ExposureMode.SetValue(
+        Basler_UniversalCameraParams::ExposureMode_TriggerWidth);
+
+    /* Line 1 as a debounced input. */
+    if (!GenApi::IsWritable(camera->LineSelector)) {
+      g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
+                  "LineSelector is not writable");
+      return FALSE;
+    }
+    camera->LineSelector.SetValue(
+        Basler_UniversalCameraParams::LineSelector_Line1);
+
+    if (GenApi::IsWritable(camera->LineMode)) {
+      camera->LineMode.SetValue(Basler_UniversalCameraParams::LineMode_Input);
+    }
+
+    if (GenApi::IsWritable(camera->LineDebouncerTime)) {
+      camera->LineDebouncerTime.SetValue(line_debouncer_us);
+      GST_INFO("Line1 debouncer set to %.2f us", line_debouncer_us);
+    } else {
+      GST_WARNING("LineDebouncerTime is not writable; skipping");
+    }
+
+    GST_INFO("Camera-slave trigger configured "
+             "(FrameStart/On/Line1/RisingEdge, ExposureMode=TriggerWidth)");
+
+    /* Pico owns the illuminator: keep the camera LED lines off (DEC-4). */
+    if (!gst_pylon_configure_line2(self, FALSE, err)) {
+      return FALSE;
+    }
+
+    self->slave_mode = TRUE;
+    self->slave_grab_timeout_us = grab_timeout_us;
+    self->slave_miss_count = 0;
+
+    return TRUE;
+  } catch (const Pylon::GenericException &e) {
+    g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
+                "Pylon error configuring camera-slave mode: %s",
+                e.GetDescription());
     return FALSE;
   }
 }

@@ -98,6 +98,15 @@ gboolean gst_pylon_is_same_device(GstPylon *self, const gint device_index,
 gboolean gst_pylon_configure_line2(GstPylon *self, gboolean illumination,
                                    GError **err);
 
+/* epic-060: configure the camera as an external-trigger slave. The Line-1 pulse
+ * width drives the exposure (ExposureMode=TriggerWidth); chunks stay enabled so
+ * ChunkExposureTime keeps flowing for classification. grab_timeout_us bounds the
+ * per-frame grab wait (0 => unbounded); line_debouncer_us sets the Line-1
+ * debouncer (<= 5 us). */
+gboolean gst_pylon_configure_camera_slave(GstPylon *self,
+                                          gdouble line_debouncer_us,
+                                          gint64 grab_timeout_us, GError **err);
+
 gdouble gst_pylon_get_device_temperature(GstPylon *self, GError **err);
 
 void gst_pylon_device_reset(GstPylon *self);

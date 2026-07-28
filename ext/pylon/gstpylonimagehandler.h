@@ -35,6 +35,8 @@
 
 #include <gst/pylon/gstpylonincludes.h>
 
+#include <glib.h>
+
 #include <condition_variable>
 #include <mutex>
 
@@ -44,7 +46,15 @@ class GstPylonImageHandler : public Pylon::CBaslerUniversalImageEventHandler {
   void OnImageGrabbed(
       Pylon::CBaslerUniversalInstantCamera &camera,
       const Pylon::CBaslerUniversalGrabResultPtr &grab_result) override;
-  Pylon::CBaslerUniversalGrabResultPtr *WaitForImage();
+  /* Wait for the next grabbed image.
+   *
+   * timeout_us == 0 waits indefinitely (default source behavior). A positive
+   * timeout_us bounds the wait (used by epic-060 camera-slave mode to detect a
+   * lost external trigger). Returns the grab result on success, or NULL on
+   * either an interrupt or a timeout; *timed_out (when non-NULL) distinguishes
+   * the two: TRUE means the wait expired, FALSE means an interrupt/EOS. */
+  Pylon::CBaslerUniversalGrabResultPtr *WaitForImage(gint64 timeout_us,
+                                                     bool *timed_out);
   void InterruptWaitForImage();
 
  private:
