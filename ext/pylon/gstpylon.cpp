@@ -2306,6 +2306,23 @@ gboolean gst_pylon_configure_camera_slave(GstPylon *self,
     camera->ExposureMode.SetValue(
         Basler_UniversalCameraParams::ExposureMode_TriggerWidth);
 
+    /* Disable the camera's internal frame-rate cap so acquisition timing is driven
+     * SOLELY by the Line-1 trigger. If AcquisitionFrameRateEnable stays true the
+     * camera's own rate limiter pins acquisition timing and the exposure never
+     * follows the external trigger width (image never varies) — a hard-to-spot HW
+     * gotcha that must be cleared for camera-slave to work. */
+    {
+      GenApi::INodeMap &fr_nodemap = camera->GetNodeMap();
+      Pylon::CBooleanParameter frEnable(fr_nodemap, "AcquisitionFrameRateEnable");
+      if (frEnable.IsValid() && frEnable.IsWritable()) {
+        frEnable.SetValue(false);
+        GST_INFO("camera-slave: AcquisitionFrameRateEnable=false (Line-1 owns timing)");
+      } else {
+        GST_WARNING("camera-slave: AcquisitionFrameRateEnable not writable; "
+                    "the camera's internal rate cap may override the trigger");
+      }
+    }
+
     /* Line 1 as a debounced input. */
     if (!GenApi::IsWritable(camera->LineSelector)) {
       g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
