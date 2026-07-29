@@ -93,7 +93,7 @@ HdrMetadataPlugin::ProcessAndAttachMetadata(GstBuffer* buffer,
 
 HdrMetadataPlugin::SlaveResult
 HdrMetadataPlugin::ProcessAndAttachMetadataSlave(GstBuffer* buffer,
-                                                 guint32 exposure_time) {
+                                                 guint64 frame_id) {
     if (!is_configured_ || !provider_) {
         GST_WARNING("HDR metadata plugin not configured");
         return SlaveResult::Error;
@@ -106,10 +106,10 @@ HdrMetadataPlugin::ProcessAndAttachMetadataSlave(GstBuffer* buffer,
 
     try {
         HdrMetadata::HdrMetadata hdr_meta;
-        if (!provider_->ProcessFrameSlave(exposure_time, hdr_meta)) {
-            // No exposure matched the active profile within tolerance -> drop.
-            GST_LOG("Camera-slave: exposure %u us did not match active profile "
-                    "-> drop", exposure_time);
+        if (!provider_->ProcessFrameSlave(frame_id, hdr_meta)) {
+            // Active profile not configured with expected exposures -> drop.
+            GST_LOG("Camera-slave: frame %" G_GUINT64_FORMAT
+                    " could not be windowed -> drop", frame_id);
             return SlaveResult::Dropped;
         }
 

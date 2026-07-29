@@ -39,7 +39,7 @@ public:
     // counter (bypasses CalculateFrameOffset/GetMasterSequence). Returns false
     // (no-match / not configured) to signal that the frame MUST be dropped;
     // never throws.
-    bool ProcessFrameSlave(uint32_t actualExposureTime, HdrMetadata& out);
+    bool ProcessFrameSlave(uint64_t frameId, HdrMetadata& out);
 
     // Camera-slave mode: set the authoritative classification profile (§2.5).
     // Stored as an atomic pending-profile consumed at the top of
@@ -100,6 +100,12 @@ private:
     int _lastSlaveSetIndex = -1;
     bool _slaveInitialized = false;
     bool _forceNewWindow = false;
+    // Frame-id (block-id) ring windowing. ChunkExposureTime does not track the
+    // per-frame trigger width in TriggerWidth mode, so slave-mode windowing is
+    // derived from the camera-assigned, drop-robust block id instead (§2.5):
+    // set_index = (frameId - base) % windowSize, master = baseMaster + rel/window.
+    uint64_t _slaveBaseFrameId = 0;
+    uint64_t _slaveBaseMaster = 0;
 };
 
 } // namespace HdrMetadata

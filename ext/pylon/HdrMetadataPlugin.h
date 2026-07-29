@@ -67,15 +67,15 @@ public:
 
     /**
      * Process frame and attach HDR metadata in camera-slave mode (epic-060).
-     * Uses nearest-match classification scoped to the active profile and never
-     * throws. A non-matching exposure yields SlaveResult::Dropped so the caller
-     * can drop the frame instead of pushing a meta-less buffer.
+     * Windows by the camera-assigned block id (drop-robust ring); the measured
+     * ChunkExposureTime is not used because it does not track the per-frame
+     * trigger width in TriggerWidth mode.
      * @param buffer GStreamer buffer to attach metadata to
-     * @param exposure_time Measured exposure time in microseconds (chunk data)
+     * @param frame_id Camera block id (monotonic, one per external trigger)
      * @return classification result
      */
     SlaveResult ProcessAndAttachMetadataSlave(GstBuffer* buffer,
-                                              guint32 exposure_time);
+                                              guint64 frame_id);
 
     /**
      * Set the authoritative classification profile for camera-slave mode (§2.5).

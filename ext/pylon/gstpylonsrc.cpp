@@ -1339,19 +1339,24 @@ static gboolean gst_pylon_src_start(GstBaseSrc *src) {
     mode_val = self->mode;
     GST_OBJECT_UNLOCK(self);
 
-    if (mode_set && illum_set) {
-      gint implied = illum_val ? GST_PYLON_MODE_ILLUMINATION
-                               : GST_PYLON_MODE_NON_ILLUMINATION;
-      if (mode_val != implied) {
-        GST_ELEMENT_ERROR(
-            self, LIBRARY, SETTINGS,
-            ("Conflicting 'mode' and 'illumination' properties."),
-            ("mode=%d but illumination=%s imply different modes", mode_val,
-             illum_val ? "true" : "false"));
-        return FALSE;
+    if (mode_set) {
+      /* Explicit 'mode' wins (§2.2). The legacy 'illumination' boolean can only
+       * express illumination/non-illumination, so it is cross-checked only for
+       * those two modes. camera-slave is orthogonal to it: the Pico owns the LED,
+       * so the camera drives no illumination line — consistent with the pipeline
+       * editor emitting illumination=false alongside mode=camera-slave. */
+      if (illum_set && mode_val != GST_PYLON_MODE_CAMERA_SLAVE) {
+        gint implied = illum_val ? GST_PYLON_MODE_ILLUMINATION
+                                 : GST_PYLON_MODE_NON_ILLUMINATION;
+        if (mode_val != implied) {
+          GST_ELEMENT_ERROR(
+              self, LIBRARY, SETTINGS,
+              ("Conflicting 'mode' and 'illumination' properties."),
+              ("mode=%d but illumination=%s imply different modes", mode_val,
+               illum_val ? "true" : "false"));
+          return FALSE;
+        }
       }
-      effective = mode_val;
-    } else if (mode_set) {
       effective = mode_val;
     } else if (illum_set) {
       effective = illum_val ? GST_PYLON_MODE_ILLUMINATION
@@ -1688,35 +1693,29 @@ static GstFlowReturn gst_pylon_src_create(GstPushSrc *src, GstBuffer **buf) {
 
     if (self->hdr_plugin && self->hdr_plugin->IsConfigured()) {
       GstPylonMeta *pylon_meta = gst_buffer_get_pylon_meta(*buf);
-      guint32 exposure_time = 0;
 
-      if (pylon_meta && pylon_meta->chunks) {
-        gdouble chunk_exposure = 0;
-        if (gst_structure_get_double(pylon_meta->chunks, "ChunkExposureTime",
-                                     &chunk_exposure) ||
-            gst_structure_get_double(pylon_meta->chunks, "ChunkExposureTimeAbs",
-                                     &chunk_exposure)) {
-          exposure_time = (guint32)chunk_exposure;
-        }
-      }
-
-      if (exposure_time > 0) {
+      if (pylon_meta) {
+        /* Window by the camera-assigned block id. ChunkExposureTime does NOT
+         * track the per-frame trigger-width exposure in TriggerWidth mode, so it
+         * cannot classify; the block id increments once per external trigger and
+         * is drop-robust (§2.5). */
+        guint64 frame_id = (guint64)pylon_meta->block_id;
         HdrMetadataPlugin::SlaveResult result =
-            self->hdr_plugin->ProcessAndAttachMetadataSlave(*buf, exposure_time);
+            self->hdr_plugin->ProcessAndAttachMetadataSlave(*buf, frame_id);
         if (result == HdrMetadataPlugin::SlaveResult::Attached) {
           drop = FALSE;
         } else if (result == HdrMetadataPlugin::SlaveResult::Dropped) {
           GST_LOG_OBJECT(self,
-                         "camera-slave: exposure %u us out of tolerance, "
-                         "dropping frame",
-                         exposure_time);
+                         "camera-slave: frame %" G_GUINT64_FORMAT
+                         " could not be windowed, dropping frame",
+                         frame_id);
         } else {
           GST_WARNING_OBJECT(
               self, "camera-slave: classifier error, dropping frame");
         }
       } else {
         GST_DEBUG_OBJECT(
-            self, "camera-slave: no ChunkExposureTime available, dropping frame");
+            self, "camera-slave: no pylon meta available, dropping frame");
       }
     } else {
       GST_WARNING_OBJECT(self,

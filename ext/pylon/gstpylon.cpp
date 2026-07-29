@@ -2243,6 +2243,28 @@ gboolean gst_pylon_configure_camera_slave(GstPylon *self,
              "debouncer=%.2f us, grab-timeout=%" G_GINT64_FORMAT " us)",
              line_debouncer_us, grab_timeout_us);
 
+    /* Clean slate: force the internal HDR sequencer OFF. In camera-slave the
+     * exposure comes solely from the external Line-1 trigger width; a stale
+     * SequencerMode=On (left over from a previous hdr-sequence / illumination
+     * run, or a crashed configuration) makes the camera cycle its own exposure
+     * sets on top of the trigger, producing spurious alternating dark/bright
+     * frames. Exit configuration mode first, then disable the sequencer. */
+    {
+      GenApi::INodeMap &nodemap = camera->GetNodeMap();
+      Pylon::CEnumParameter seqConfigMode(nodemap, "SequencerConfigurationMode");
+      if (seqConfigMode.IsValid() && seqConfigMode.IsWritable() &&
+          Pylon::String_t(seqConfigMode.GetValue()) == "On") {
+        GST_INFO("camera-slave: leaving SequencerConfigurationMode");
+        seqConfigMode.SetValue("Off");
+      }
+      Pylon::CEnumParameter sequencerMode(nodemap, "SequencerMode");
+      if (sequencerMode.IsValid() && sequencerMode.IsWritable() &&
+          Pylon::String_t(sequencerMode.GetValue()) == "On") {
+        GST_INFO("camera-slave: disabling stale internal SequencerMode (clean slate)");
+        sequencerMode.SetValue("Off");
+      }
+    }
+
     /* FrameStart triggered by the rising edge of Line 1. */
     if (!GenApi::IsWritable(camera->TriggerSelector)) {
       g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
