@@ -51,6 +51,7 @@
 #include "gstpylonimagehandler.h"
 #include "gstpylonsysmembufferfactory.h"
 
+#include <cmath>
 #include <map>
 #include <vector>
 
@@ -1216,6 +1217,164 @@ gboolean gst_pylon_configure_dual_hdr_sequence(GstPylon *self,
   }
 
   return TRUE;
+}
+
+/* Basic mode (no camera sequencer): put the camera into plain manual-exposure
+ * operation so ExposureTime/Gain writes actually take effect while streaming.
+ * Mirrors what aravissrc relies on, and clears state a previous sequencer or
+ * camera-slave run may have left behind on the device. */
+gboolean gst_pylon_configure_basic_exposure(GstPylon *self, gint offset_x,
+                                            gint offset_y, GError **err) {
+  g_return_val_if_fail(self, FALSE);
+  g_return_val_if_fail(err && *err == NULL, FALSE);
+
+  try {
+    GenApi::INodeMap &nodemap = self->camera->GetNodeMap();
+
+    /* Clean slate: a SequencerMode left On by a previous hdr-sequence run (or a
+     * crashed configuration) keeps cycling the camera's own exposure sets on top
+     * of every value we write, which looks exactly like "the profile never
+     * switches". Leave configuration mode first, then disable the sequencer. */
+    Pylon::CEnumParameter seqConfigMode(nodemap, "SequencerConfigurationMode");
+    if (seqConfigMode.IsValid() && seqConfigMode.IsWritable() &&
+        Pylon::String_t(seqConfigMode.GetValue()) == "On") {
+      GST_INFO("basic mode: leaving SequencerConfigurationMode");
+      seqConfigMode.SetValue("Off");
+    }
+    Pylon::CEnumParameter sequencerMode(nodemap, "SequencerMode");
+    if (sequencerMode.IsValid() && sequencerMode.IsWritable() &&
+        Pylon::String_t(sequencerMode.GetValue()) == "On") {
+      GST_INFO("basic mode: disabling stale SequencerMode (clean slate)");
+      sequencerMode.SetValue("Off");
+    }
+
+    /* ExposureTime is only honoured in Timed exposure mode; a previous
+     * camera-slave run leaves ExposureMode=TriggerWidth, in which the camera
+     * ignores ExposureTime entirely. */
+    Pylon::CEnumParameter exposureMode(nodemap, "ExposureMode");
+    if (exposureMode.IsValid() && exposureMode.CanSetValue("Timed")) {
+      exposureMode.SetValue("Timed");
+      GST_INFO("basic mode: ExposureMode = Timed");
+    }
+
+    /* Take manual control. If the camera's user set has ExposureAuto=Continuous
+     * the auto algorithm silently overwrites every value we set. */
+    Pylon::CEnumParameter exposureAuto(nodemap, "ExposureAuto");
+    if (exposureAuto.IsValid() && exposureAuto.CanSetValue("Off")) {
+      exposureAuto.SetValue("Off");
+      GST_INFO("basic mode: ExposureAuto = Off");
+    } else if (exposureAuto.IsValid()) {
+      GST_WARNING(
+          "basic mode: cannot set ExposureAuto=Off - auto exposure may override "
+          "the values written on profile switch");
+    }
+
+    Pylon::CEnumParameter gainAuto(nodemap, "GainAuto");
+    if (gainAuto.IsValid() && gainAuto.CanSetValue("Off")) {
+      gainAuto.SetValue("Off");
+      GST_INFO("basic mode: GainAuto = Off");
+    }
+
+    /* Sensor offsets: in the sequencer path these are applied per set, so in
+     * basic mode they have to be applied here or they silently do nothing. */
+    if (offset_x > 0) {
+      Pylon::CIntegerParameter offsetX(nodemap, "OffsetX");
+      if (offsetX.IsValid() && offsetX.IsWritable()) {
+        offsetX.SetValue(offset_x,
+                         Pylon::EIntegerValueCorrection::IntegerValueCorrection_Nearest);
+        GST_INFO("basic mode: OffsetX = %ld",
+                 static_cast<long>(offsetX.GetValue()));
+      } else {
+        GST_WARNING("basic mode: OffsetX not writable, sensor-offset-x ignored");
+      }
+    }
+    if (offset_y > 0) {
+      Pylon::CIntegerParameter offsetY(nodemap, "OffsetY");
+      if (offsetY.IsValid() && offsetY.IsWritable()) {
+        offsetY.SetValue(offset_y,
+                         Pylon::EIntegerValueCorrection::IntegerValueCorrection_Nearest);
+        GST_INFO("basic mode: OffsetY = %ld",
+                 static_cast<long>(offsetY.GetValue()));
+      } else {
+        GST_WARNING("basic mode: OffsetY not writable, sensor-offset-y ignored");
+      }
+    }
+
+    return TRUE;
+
+  } catch (const Pylon::GenericException &e) {
+    g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
+                "Failed to configure basic exposure mode: %s",
+                e.GetDescription());
+    return FALSE;
+  }
+}
+
+/* Basic mode: write ExposureTime (and Gain, when the camera has it) live on the
+ * streaming camera. Values are clipped to the camera's current range - the
+ * usable maximum shrinks as AcquisitionFrameRate rises - and read back, so the
+ * log shows what the camera actually accepted rather than what we asked for. */
+gboolean gst_pylon_set_exposure_gain(GstPylon *self, gdouble exposure_us,
+                                     gdouble gain, GError **err) {
+  g_return_val_if_fail(self, FALSE);
+  g_return_val_if_fail(err && *err == NULL, FALSE);
+
+  try {
+    GenApi::INodeMap &nodemap = self->camera->GetNodeMap();
+
+    Pylon::CFloatParameter exposureTime(nodemap, "ExposureTime");
+    if (!exposureTime.IsValid()) {
+      exposureTime.Attach(nodemap.GetNode("ExposureTimeAbs"));
+    }
+    if (!exposureTime.IsValid()) {
+      g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
+                  "Camera has no ExposureTime parameter");
+      return FALSE;
+    }
+    if (!exposureTime.IsWritable()) {
+      g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
+                  "ExposureTime is not writable (auto exposure still on, or the "
+                  "camera is in a triggered exposure mode)");
+      return FALSE;
+    }
+
+    exposureTime.SetValue(
+        exposure_us, Pylon::EFloatValueCorrection::FloatValueCorrection_ClipToRange);
+    const gdouble applied_exposure = exposureTime.GetValue();
+    if (std::abs(applied_exposure - exposure_us) > 1.0) {
+      GST_WARNING(
+          "basic mode: requested ExposureTime %.2f us, camera applied %.2f us "
+          "(clipped to [%.2f, %.2f] - check AcquisitionFrameRate headroom)",
+          exposure_us, applied_exposure, exposureTime.GetMin(),
+          exposureTime.GetMax());
+    } else {
+      GST_INFO("basic mode: ExposureTime = %.2f us", applied_exposure);
+    }
+
+    Pylon::CFloatParameter gainFloat(nodemap, "Gain");
+    if (gainFloat.IsValid() && gainFloat.IsWritable()) {
+      gainFloat.SetValue(
+          gain, Pylon::EFloatValueCorrection::FloatValueCorrection_ClipToRange);
+      GST_INFO("basic mode: Gain = %.2f", gainFloat.GetValue());
+    } else {
+      Pylon::CIntegerParameter gainRaw(nodemap, "GainRaw");
+      if (gainRaw.IsValid() && gainRaw.IsWritable()) {
+        gainRaw.SetValue(static_cast<gint64>(gain),
+                         Pylon::EIntegerValueCorrection::IntegerValueCorrection_Nearest);
+        GST_INFO("basic mode: GainRaw = %ld",
+                 static_cast<long>(gainRaw.GetValue()));
+      } else if (gain != 0.0) {
+        GST_WARNING("basic mode: Gain not writable, gain=%.2f ignored", gain);
+      }
+    }
+
+    return TRUE;
+
+  } catch (const Pylon::GenericException &e) {
+    g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
+                "Failed to set exposure/gain: %s", e.GetDescription());
+    return FALSE;
+  }
 }
 
 gboolean gst_pylon_switch_hdr_profile(GstPylon *self, gint profile, GError **err) {

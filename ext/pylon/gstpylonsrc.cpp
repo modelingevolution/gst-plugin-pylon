@@ -89,6 +89,15 @@ struct _GstPylonSrc {
   gboolean mode_explicitly_set;
   gboolean illumination_explicitly_set;
   gint active_profile;
+  /* Basic mode (no camera sequencer): the first exposure:gain pair of
+   * hdr-sequence / hdr-sequence2 becomes a plain ExposureTime/Gain written live
+   * on profile switch, exactly like aravissrc's direct exposure control. */
+  gboolean basic_camera;
+  gdouble basic_exposure[2];
+  gdouble basic_gain[2];
+  gboolean basic_configured;
+  std::atomic<gint> basic_pending_profile;
+  std::atomic<gint> basic_applied_profile;
   std::atomic<guint> dropped_frames;
   gint sensor_offset_x;
   gint sensor_offset_y;
@@ -140,6 +149,7 @@ enum {
   PROP_HDR_SEQUENCE,
   PROP_HDR_SEQUENCE2,
   PROP_HDR_PROFILE,
+  PROP_BASIC_CAMERA,
   PROP_CAM,
   PROP_STREAM,
   PROP_ILLUMINATION,
@@ -168,6 +178,7 @@ enum {
 #define PROP_HDR_SEQUENCE_DEFAULT NULL
 #define PROP_HDR_SEQUENCE2_DEFAULT NULL
 #define PROP_HDR_PROFILE_DEFAULT 0
+#define PROP_BASIC_CAMERA_DEFAULT FALSE
 #define PROP_CAM_DEFAULT NULL
 #define PROP_STREAM_DEFAULT NULL
 #define PROP_CAPTURE_ERROR_DEFAULT ENUM_ABORT
@@ -431,6 +442,21 @@ static void gst_pylon_src_class_init(GstPylonSrcClass *klass) {
           static_cast<GParamFlags>(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 
   g_object_class_install_property(
+      gobject_class, PROP_BASIC_CAMERA,
+      g_param_spec_boolean(
+          "basic-camera", "Basic camera (no sequencer)",
+          "Camera has no usable Sequencer / SoftwareSignal support (e.g. ace 2 "
+          "Basic). Instead of programming a sequencer, only the FIRST "
+          "exposure:gain pair of hdr-sequence (profile 0) and hdr-sequence2 "
+          "(profile 1) is used, and switching hdr-profile writes that pair "
+          "straight to the camera's ExposureTime/Gain while streaming - the "
+          "same direct exposure control aravissrc uses. Any further pairs are "
+          "ignored: there is no HDR bracketing in this mode.",
+          PROP_BASIC_CAMERA_DEFAULT,
+          static_cast<GParamFlags>(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+                                   GST_PARAM_MUTABLE_READY)));
+
+  g_object_class_install_property(
       gobject_class, PROP_ILLUMINATION,
       g_param_spec_boolean(
           "illumination", "Illumination Control",
@@ -627,6 +653,12 @@ static void gst_pylon_src_init(GstPylonSrc *self) {
   self->mode_explicitly_set = FALSE;
   self->illumination_explicitly_set = FALSE;
   self->active_profile = PROP_ACTIVE_PROFILE_DEFAULT;
+  self->basic_camera = PROP_BASIC_CAMERA_DEFAULT;
+  self->basic_exposure[0] = self->basic_exposure[1] = 0.0;
+  self->basic_gain[0] = self->basic_gain[1] = 0.0;
+  self->basic_configured = FALSE;
+  self->basic_pending_profile.store(-1, std::memory_order_relaxed);
+  self->basic_applied_profile.store(-1, std::memory_order_relaxed);
   self->dropped_frames.store(0, std::memory_order_relaxed);
   self->sensor_offset_x = PROP_SENSOR_OFFSET_X_DEFAULT;
   self->sensor_offset_y = PROP_SENSOR_OFFSET_Y_DEFAULT;
@@ -686,11 +718,32 @@ static void gst_pylon_src_set_property(GObject *object, guint property_id,
       g_free(self->hdr_sequence2);
       self->hdr_sequence2 = g_value_dup_string(value);
       break;
+    case PROP_BASIC_CAMERA:
+      self->basic_camera = g_value_get_boolean(value);
+      break;
     case PROP_HDR_PROFILE:
       {
         gint new_profile = g_value_get_int(value);
         if (new_profile >= 0 && new_profile <= 1) {
-          if (self->hdr_plugin && self->hdr_plugin->IsConfigured()) {
+          if (self->basic_camera) {
+            /* Basic mode: publish the request only. The nodemap write happens on
+             * the capture thread in create(), so GenApi access stays on a single
+             * thread and lands on a frame boundary (same hop the sequencer path
+             * takes through HdrProfileSwitcher). */
+            if (self->basic_configured) {
+              self->basic_pending_profile.store(new_profile,
+                                                std::memory_order_release);
+              GST_INFO_OBJECT(self,
+                              "Basic mode: profile %d requested (%.2f us, "
+                              "gain %.2f)",
+                              new_profile, self->basic_exposure[new_profile],
+                              self->basic_gain[new_profile]);
+            } else {
+              GST_WARNING_OBJECT(self,
+                                 "Cannot switch profile - basic mode not "
+                                 "configured (hdr-sequence missing?)");
+            }
+          } else if (self->hdr_plugin && self->hdr_plugin->IsConfigured()) {
             // With software signals on all states, only need 1 retry
             gint retry_count = 1;
             self->hdr_switcher->RequestSwitch(new_profile, retry_count);
@@ -822,9 +875,17 @@ static void gst_pylon_src_get_property(GObject *object, guint property_id,
     case PROP_HDR_SEQUENCE2:
       g_value_set_string(value, self->hdr_sequence2);
       break;
+    case PROP_BASIC_CAMERA:
+      g_value_set_boolean(value, self->basic_camera);
+      break;
     case PROP_HDR_PROFILE:
+      /* Basic mode reports the profile actually written to the camera (-1 until
+       * the first successful write), so the readback is a real closed loop
+       * rather than an echo of the request. */
       g_value_set_int(value,
-        self->hdr_plugin ? self->hdr_plugin->GetCurrentProfile() : -1);
+        self->basic_camera
+            ? self->basic_applied_profile.load(std::memory_order_acquire)
+            : (self->hdr_plugin ? self->hdr_plugin->GetCurrentProfile() : -1));
       break;
 #ifdef NVMM_ENABLED
     case PROP_NVSURFACE_LAYOUT:
@@ -1074,6 +1135,42 @@ static void gst_pylon_src_enable_hdr_chunks(GstPylonSrc *self) {
 }
 
 /* notify the subclass of new caps */
+/* Basic mode: take the FIRST "exposure[:gain]" pair of a sequence string.
+ * Returns FALSE when the string is empty or the exposure is not a positive
+ * number. Any further pairs are deliberately ignored - basic mode has no
+ * bracketing - but the caller warns so nobody thinks HDR is still running. */
+static gboolean gst_pylon_src_parse_first_pair(const gchar *sequence,
+                                               gdouble *exposure, gdouble *gain,
+                                               guint *num_pairs) {
+  gchar **steps = NULL;
+  gchar **parts = NULL;
+  gboolean ok = FALSE;
+
+  *exposure = 0.0;
+  *gain = 0.0;
+  *num_pairs = 0;
+
+  if (!sequence || strlen(sequence) == 0) return FALSE;
+
+  steps = g_strsplit(sequence, ",", -1);
+  *num_pairs = g_strv_length(steps);
+  if (*num_pairs == 0) {
+    g_strfreev(steps);
+    return FALSE;
+  }
+
+  parts = g_strsplit(g_strstrip(steps[0]), ":", 2);
+  if (parts[0] && strlen(g_strstrip(parts[0])) > 0) {
+    *exposure = g_strtod(parts[0], NULL);
+    *gain = parts[1] ? g_strtod(parts[1], NULL) : 0.0;
+    ok = (*exposure > 0.0);
+  }
+
+  g_strfreev(parts);
+  g_strfreev(steps);
+  return ok;
+}
+
 static gboolean gst_pylon_src_set_caps(GstBaseSrc *src, GstCaps *caps) {
   GstPylonSrc *self = GST_PYLON_SRC(src);
   GstStructure *st = NULL;
@@ -1127,10 +1224,107 @@ static gboolean gst_pylon_src_set_caps(GstBaseSrc *src, GstCaps *caps) {
   mode = self->mode;
   GST_OBJECT_UNLOCK(self);
 
-  /* epic-060: camera-slave replaces the internal-sequencer configuration with a
-   * Line-1 trigger-width setup; the same hdr-sequence/hdr-sequence2 lists become
-   * the classifier's expected exposures (NOT written to a camera sequencer). */
-  if (mode == GST_PYLON_MODE_CAMERA_SLAVE) {
+  self->basic_configured = FALSE;
+
+  /* Basic mode: no camera sequencer at all. Keep only the first exposure:gain
+   * pair per profile and drive the camera's ExposureTime/Gain directly on every
+   * profile switch (see gst_pylon_src_create). */
+  if (self->basic_camera) {
+    guint n0 = 0, n1 = 0;
+    gint initial_profile = 0;
+    gdouble exp0 = 0.0, gain0 = 0.0, exp1 = 0.0, gain1 = 0.0;
+
+    if (mode == GST_PYLON_MODE_CAMERA_SLAVE) {
+      error_msg = g_strdup(
+          "basic-camera and mode=camera-slave are mutually exclusive: in "
+          "camera-slave the exposure comes from the Line-1 trigger width, so "
+          "pylonsrc must not write ExposureTime itself");
+      action = "configure basic mode";
+      goto error;
+    }
+
+    if (!gst_pylon_src_parse_first_pair(self->hdr_sequence, &exp0, &gain0,
+                                        &n0)) {
+      error_msg = g_strdup(
+          "basic-camera requires hdr-sequence to hold at least one positive "
+          "'exposure[:gain]' pair (profile 0 / DARK)");
+      action = "configure basic mode";
+      goto error;
+    }
+
+    /* hdr-sequence2 is optional: without it both profiles resolve to the same
+     * exposure, which makes switching a no-op but is not an error (a pipeline
+     * may legitimately run a single fixed exposure). */
+    if (!gst_pylon_src_parse_first_pair(self->hdr_sequence2, &exp1, &gain1,
+                                        &n1)) {
+      exp1 = exp0;
+      gain1 = gain0;
+      GST_WARNING_OBJECT(self,
+                         "basic-camera: hdr-sequence2 is empty, profile 1 "
+                         "falls back to profile 0 (%.2f us) - switching will "
+                         "have no visible effect",
+                         exp1);
+    }
+
+    if (n0 > 1 || n1 > 1) {
+      GST_WARNING_OBJECT(self,
+                         "basic-camera: only the first pair of each sequence is "
+                         "used (hdr-sequence has %u, hdr-sequence2 has %u); "
+                         "there is NO HDR bracketing in basic mode",
+                         n0, n1);
+    }
+
+    GST_INFO_OBJECT(self,
+                    "Basic mode: profile 0 = %.2f us / gain %.2f, "
+                    "profile 1 = %.2f us / gain %.2f",
+                    exp0, gain0, exp1, gain1);
+
+    /* Publish the parsed pairs and read the starting profile in one critical
+     * section: set_property may race in from pylon-target's thread. */
+    GST_OBJECT_LOCK(self);
+    self->basic_exposure[0] = exp0;
+    self->basic_gain[0] = gain0;
+    self->basic_exposure[1] = exp1;
+    self->basic_gain[1] = gain1;
+    initial_profile = (self->hdr_profile == 1) ? 1 : 0;
+    GST_OBJECT_UNLOCK(self);
+
+    /* Clean slate + take manual control of exposure/gain. Without this a
+     * camera whose user set has ExposureAuto=Continuous silently overrides
+     * every write we make, and a sequencer left On by a previous run keeps
+     * cycling its own sets on top of ours. */
+    ret = gst_pylon_configure_basic_exposure(self->pylon, self->sensor_offset_x,
+                                             self->sensor_offset_y, &error);
+    if (FALSE == ret) {
+      action = "configure basic mode";
+      if (error) goto log_error;
+      error_msg = g_strdup("Unknown error configuring basic exposure mode");
+      goto error;
+    }
+
+    /* Apply the starting profile now so the very first frame already carries the
+     * right exposure, instead of waiting for pylon-target's first buffer. */
+    ret = gst_pylon_set_exposure_gain(self->pylon,
+                                      (initial_profile == 1) ? exp1 : exp0,
+                                      (initial_profile == 1) ? gain1 : gain0,
+                                      &error);
+    if (FALSE == ret) {
+      action = "apply basic mode exposure";
+      if (error) goto log_error;
+      error_msg = g_strdup("Unknown error applying basic mode exposure");
+      goto error;
+    }
+
+    self->basic_applied_profile.store(initial_profile, std::memory_order_release);
+    self->basic_pending_profile.store(-1, std::memory_order_release);
+    GST_OBJECT_LOCK(self);
+    self->basic_configured = TRUE;
+    GST_OBJECT_UNLOCK(self);
+
+    /* epic-060: camera-slave replaces the internal-sequencer configuration with a
+     * Line-1 trigger-width setup; the same hdr-sequence/hdr-sequence2 lists become
+     * the classifier's expected exposures (NOT written to a camera sequencer). */
+  } else if (mode == GST_PYLON_MODE_CAMERA_SLAVE) {
     if (!self->hdr_sequence || strlen(self->hdr_sequence) == 0) {
       error_msg = g_strdup(
           "camera-slave mode requires hdr-sequence (expected exposures for "
@@ -1641,15 +1835,51 @@ static GstFlowReturn gst_pylon_src_create(GstPushSrc *src, GstBuffer **buf) {
   GstFlowReturn ret = GST_FLOW_OK;
   gint capture_error = -1;
   gint mode = GST_PYLON_MODE_ILLUMINATION;
+  gboolean basic_camera = FALSE;
+  gdouble basic_exposure = 0.0;
+  gdouble basic_gain = 0.0;
 
   GST_OBJECT_LOCK(self);
   capture_error = self->capture_error;
   mode = self->mode;
+  basic_camera = self->basic_camera;
   GST_OBJECT_UNLOCK(self);
+
+  /* Basic mode: apply the requested exposure/gain directly. Runs on the capture
+   * thread, between frames. The pending/applied pair is a real closed loop - a
+   * failed write leaves 'pending' set, so the next frame retries instead of the
+   * switch being lost the way a dropped SoftwareSignal pulse is. */
+  if (basic_camera) {
+    gint pending = self->basic_pending_profile.load(std::memory_order_acquire);
+    if (pending >= 0 &&
+        pending != self->basic_applied_profile.load(std::memory_order_acquire)) {
+      GError *exp_error = NULL;
+      GST_OBJECT_LOCK(self);
+      basic_exposure = self->basic_exposure[pending];
+      basic_gain = self->basic_gain[pending];
+      GST_OBJECT_UNLOCK(self);
+
+      if (gst_pylon_set_exposure_gain(self->pylon, basic_exposure, basic_gain,
+                                      &exp_error)) {
+        self->basic_applied_profile.store(pending, std::memory_order_release);
+        self->basic_pending_profile.store(-1, std::memory_order_release);
+        GST_INFO_OBJECT(self,
+                        "Basic mode: switched to profile %d (%.2f us, gain %.2f)",
+                        pending, basic_exposure, basic_gain);
+      } else {
+        GST_WARNING_OBJECT(self,
+                           "Basic mode: failed to apply profile %d, retrying on "
+                           "next frame: %s",
+                           pending,
+                           exp_error ? exp_error->message : "Unknown error");
+        if (exp_error) g_error_free(exp_error);
+      }
+    }
+  }
 
   // Check if we need to send profile switch signals
   gint signal_profile;
-  if (self->hdr_switcher->GetPendingSignal(&signal_profile)) {
+  if (!basic_camera && self->hdr_switcher->GetPendingSignal(&signal_profile)) {
     GError *switch_error = NULL;
     if (gst_pylon_switch_hdr_profile(self->pylon, signal_profile, &switch_error)) {
       GST_DEBUG_OBJECT(self, "Sent profile switch signal for profile %d", signal_profile);

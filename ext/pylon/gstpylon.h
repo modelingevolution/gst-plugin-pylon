@@ -85,6 +85,17 @@ gboolean gst_pylon_configure_dual_hdr_sequence(GstPylon *self,
                                                gint offset_x, gint offset_y,
                                                GError **err);
 gboolean gst_pylon_switch_hdr_profile(GstPylon *self, gint profile, GError **err);
+
+/* Basic mode (basic-camera=true): the camera has no usable Sequencer /
+ * SoftwareSignal support, so profiles are just two exposure/gain pairs written
+ * directly to the streaming camera. configure_basic_exposure puts the device in
+ * plain manual-exposure operation (sequencer off, ExposureMode=Timed,
+ * ExposureAuto/GainAuto off, sensor offsets applied); set_exposure_gain writes
+ * one pair, clipping to the camera's range and logging what was accepted. */
+gboolean gst_pylon_configure_basic_exposure(GstPylon *self, gint offset_x,
+                                            gint offset_y, GError **err);
+gboolean gst_pylon_set_exposure_gain(GstPylon *self, gdouble exposure_us,
+                                     gdouble gain, GError **err);
 gchar *gst_pylon_camera_get_string_properties();
 gchar *gst_pylon_stream_grabber_get_string_properties();
 
