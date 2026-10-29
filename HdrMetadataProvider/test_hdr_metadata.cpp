@@ -255,12 +255,74 @@ void test_mid_cycle_switches() {
     std::cout << "✓ Mid-cycle switches test passed" << std::endl;
 }
 
+// epic-135: camera-slave (block-id) windowing across profile switches.
+void test_slave_identical_lists_and_drop() {
+    std::cout << "Testing camera-slave: unconfigured profile drops, identical lists keep window + profile..." << std::endl;
+
+    // (a) a profile without an expected list drops every frame once selected
+    {
+        std::vector<uint32_t> profile0 = {100, 2000};
+        std::vector<uint32_t> profile1 = {};
+        std::vector<uint32_t> adjusted0, adjusted1;
+        auto provider = HdrMetadataProvider::Create(profile0, profile1, adjusted0, adjusted1);
+        HdrMetadata::HdrMetadata meta;
+        assert(provider->ProcessFrameSlave(10, meta));
+        assert(meta.HdrProfile == 0 && meta.ExposureCount == 2);
+        provider->SetActiveProfile(1);
+        assert(!provider->ProcessFrameSlave(11, meta));   // WindowSize()==0 -> drop
+    }
+
+    // (b) mirrored lists: a switch neither re-bases the window nor changes HdrProfile
+    {
+        std::vector<uint32_t> profile0 = {100, 2000};
+        std::vector<uint32_t> profile1 = {100, 2000};
+        std::vector<uint32_t> adjusted0, adjusted1;
+        auto provider = HdrMetadataProvider::Create(profile0, profile1, adjusted0, adjusted1);
+        HdrMetadata::HdrMetadata meta;
+        assert(provider->ProcessFrameSlave(10, meta));
+        assert(meta.ExposureSequenceIndex == 0 && meta.MasterSequence == 1);
+        assert(provider->ProcessFrameSlave(11, meta));
+        assert(meta.ExposureSequenceIndex == 1 && meta.MasterSequence == 1);
+        provider->SetActiveProfile(1);
+        assert(provider->ProcessFrameSlave(12, meta));
+        assert(meta.ExposureSequenceIndex == 0 && meta.MasterSequence == 2);   // phase kept, next window
+        assert(meta.HdrProfile == 0);                                            // published profile stable
+        assert(provider->ProcessFrameSlave(13, meta));
+        assert(meta.ExposureSequenceIndex == 1 && meta.MasterSequence == 2);
+        provider->SetActiveProfile(0);
+        assert(provider->ProcessFrameSlave(14, meta));
+        assert(meta.ExposureSequenceIndex == 0 && meta.MasterSequence == 3 && meta.HdrProfile == 0);
+    }
+
+    // (c) different lists: a switch starts a fresh window of the new profile
+    {
+        std::vector<uint32_t> profile0 = {2000};
+        std::vector<uint32_t> profile1 = {100, 200, 300};
+        std::vector<uint32_t> adjusted0, adjusted1;
+        auto provider = HdrMetadataProvider::Create(profile0, profile1, adjusted0, adjusted1);
+        HdrMetadata::HdrMetadata meta;
+        assert(provider->ProcessFrameSlave(10, meta));
+        assert(meta.MasterSequence == 1 && meta.ExposureCount == 1);
+        assert(provider->ProcessFrameSlave(11, meta));
+        assert(meta.MasterSequence == 2);
+        provider->SetActiveProfile(1);
+        assert(provider->ProcessFrameSlave(12, meta));
+        assert(meta.HdrProfile == 1 && meta.ExposureCount == 3);
+        assert(meta.ExposureSequenceIndex == 0 && meta.MasterSequence == 3);
+        assert(provider->ProcessFrameSlave(13, meta));
+        assert(meta.ExposureSequenceIndex == 1 && meta.MasterSequence == 3);
+    }
+
+    std::cout << "✓ camera-slave identical-lists / drop test passed" << std::endl;
+}
+
 int main() {
     std::cout << "Running HDR Metadata Provider C++ Tests" << std::endl;
     std::cout << "========================================" << std::endl;
 
     try {
         test_window_size_1vs1();
+    test_slave_identical_lists_and_drop();
         test_window_size_2vs3();
         test_duplicate_exposures();
         test_extensive_switching();

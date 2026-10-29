@@ -1358,6 +1358,12 @@ gboolean gst_pylon_set_exposure_gain(GstPylon *self, gdouble exposure_us,
       GError *gain_err = NULL;
       if (gst_pylon_set_gain(self, gain, &applied_gain, &gain_err)) {
         GST_INFO("basic mode: Gain = %.2f", applied_gain);
+      } else if (gain_err && gain_err->code == GST_LIBRARY_ERROR_FAILED) {
+        /* A GenICam exception on the write is a real failure (the caller retries
+         * the profile), exactly as before the extraction; only a missing node is
+         * best-effort. */
+        g_propagate_error(err, gain_err);
+        return FALSE;
       } else if (gain != 0.0) {
         GST_WARNING("basic mode: Gain not writable, gain=%.2f ignored (%s)", gain,
                     gain_err ? gain_err->message : "no Gain/GainRaw node");
@@ -2585,6 +2591,13 @@ gboolean gst_pylon_configure_camera_slave(GstPylon *self,
       }
 
       for (gint p = 0; p < 2; p++) {
+        if (is_raw && gain[p] != std::floor(gain[p])) {
+          g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
+                      "camera-slave: profile %d gain %.2f - this camera only has the "
+                      "integer GainRaw node, use a whole number",
+                      p, gain[p]);
+          return FALSE;
+        }
         if (gain[p] < gmin || gain[p] > gmax) {
           g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
                       "camera-slave: profile %d (%s) gain %.1f outside camera range "

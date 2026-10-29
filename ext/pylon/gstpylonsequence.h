@@ -33,13 +33,27 @@ typedef struct {
   gboolean mixed_gain;                         /* effective gains differ between pairs */
 } GstPylonSequence;
 
+/* Plain decimal only: digits with at most one '.', optional leading '+'. This
+ * rejects "nan", "inf", hex and exponents, which g_ascii_strtod would accept and
+ * which would then slip through a '< min || > max' range check (NaN compares
+ * false) or overflow the uint32 the exposures are cast to. */
 static inline gboolean
 gst_pylon_sequence_parse_number(const gchar *tok, gdouble *out)
 {
+  const gchar *p = tok;
+  gboolean digits = FALSE, dot = FALSE;
   gchar *end = NULL;
+
   if (!tok || !*tok) return FALSE;
+  if (*p == '+') p++;
+  for (; *p; p++) {
+    if (g_ascii_isdigit(*p)) digits = TRUE;
+    else if (*p == '.' && !dot) dot = TRUE;
+    else return FALSE;
+  }
+  if (!digits) return FALSE;
   *out = g_ascii_strtod(tok, &end);
-  return end != NULL && end != tok && *end == '\0';
+  return end != NULL && end != tok && *end == '\0' && *out <= (gdouble)G_MAXUINT32;
 }
 
 /* Returns TRUE and fills *out on success (count may be 0). Returns FALSE and, when

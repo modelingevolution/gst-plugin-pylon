@@ -95,6 +95,7 @@ private:
     // foreign thread (rocketdriver-target worker) and consumed at the top of
     // ProcessFrameSlave; the rest is only touched on the streaming thread.
     std::atomic<int> _pendingActiveProfile{0};
+    int _lastPendingSeen = 0;          // last _pendingActiveProfile value evaluated
     uint8_t _activeProfile = 0;
     uint64_t _slaveMasterSequence = 0;
     int _lastSlaveSetIndex = -1;

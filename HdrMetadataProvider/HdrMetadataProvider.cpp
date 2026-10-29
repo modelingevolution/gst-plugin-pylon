@@ -92,15 +92,19 @@ bool HdrMetadataProvider::ProcessFrameSlave(uint64_t frameId,
     // change forces a fresh window so windows from different profiles never
     // merge in the sortingbuffer.
     const int pending = _pendingActiveProfile.load(std::memory_order_acquire);
-    const uint8_t profile = (pending == 1) ? 1 : 0;
-    if (profile != _activeProfile) {
+    if (pending != _lastPendingSeen) {
+        _lastPendingSeen = pending;
+        const uint8_t profile = (pending == 1) ? 1 : 0;
         // epic-135: when the newly selected profile expects exactly the same
-        // frame-time list (mirrored / equal patterns) the ring geometry does not
-        // change, so keep the window phase instead of re-basing at an arbitrary
-        // frame. Only a genuinely different list starts a fresh window.
-        const bool same = GetProfile(profile).Exposures == GetProfile(_activeProfile).Exposures;
-        _activeProfile = profile;
-        if (!same) _forceNewWindow = true;
+        // frame-time list (mirrored / equal patterns) nothing downstream changes:
+        // keep the window phase AND the published HdrProfile, because
+        // sortingbuffer flushes its windows on any hdr_profile change. Only a
+        // genuinely different list switches the profile and starts a fresh window.
+        if (profile != _activeProfile &&
+            GetProfile(profile).Exposures != GetProfile(_activeProfile).Exposures) {
+            _activeProfile = profile;
+            _forceNewWindow = true;
+        }
     }
 
     const ProfileInfo& p = GetProfile(_activeProfile);
@@ -226,6 +230,10 @@ void HdrMetadataProvider::HandleDuplicateExposures() {
 
         uint8_t profile0Index = findExposureIndex(_profile0, dupExposure);
         uint8_t profile1Index = findExposureIndex(_profile1, dupExposure);
+        // epic-135: a profile 1 that mirrors profile 0 is a documented camera-slave
+        // configuration; the +1 us remap only touches the sequencer-mode lookup map,
+        // which that mode never consults, so do not shout about it.
+        const bool mirror = (_profile0.Exposures == _profile1.Exposures);
 
         // If found in both, adjust profile 1's value
         if (profile0Index != UINT8_MAX && profile1Index != UINT8_MAX) {
@@ -241,9 +249,11 @@ void HdrMetadataProvider::HandleDuplicateExposures() {
             _exposureMap[dupExposure] = {0, profile0Index};
             _exposureMap[adjustedExposure] = {1, profile1Index};
 
-            std::cerr << "Warning: Duplicate exposure " << dupExposure << "μs. "
-                      << "Profile 1 index " << (int)profile1Index
-                      << " adjusted to " << adjustedExposure << "μs" << std::endl;
+            if (!mirror) {
+                std::cerr << "Warning: Duplicate exposure " << dupExposure << "μs. "
+                          << "Profile 1 index " << (int)profile1Index
+                          << " adjusted to " << adjustedExposure << "μs" << std::endl;
+            }
         }
     }
 }

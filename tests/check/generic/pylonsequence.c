@@ -72,6 +72,14 @@ GST_START_TEST(test_invalid)
   PARSE_FAIL("100,,200");
   PARSE_FAIL("abc");
   PARSE_FAIL("100 200");    /* missing separator */
+  PARSE_FAIL("nan");        /* NaN would pass a '< min || > max' range check */
+  PARSE_FAIL("inf");
+  PARSE_FAIL("100:nan");
+  PARSE_FAIL("100:inf");
+  PARSE_FAIL("0x64");       /* hex */
+  PARSE_FAIL("1e3");        /* exponent */
+  PARSE_FAIL("5000000000"); /* > uint32 */
+  PARSE_FAIL("1.2.3");
 }
 GST_END_TEST
 

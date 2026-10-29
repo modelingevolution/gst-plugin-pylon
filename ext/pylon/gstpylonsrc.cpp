@@ -507,9 +507,13 @@ static void gst_pylon_src_class_init(GstPylonSrcClass *klass) {
       gobject_class, PROP_ACTIVE_PROFILE,
       g_param_spec_int(
           "active-profile", "Active HDR Profile (camera-slave)",
-          "Authoritative classifier profile (0 or 1) for camera-slave mode. "
-          "Driven by rocketdriver-target after the Pico confirms APPLY=OK. "
-          "Ignored outside camera-slave mode.",
+          "Camera-slave: request the classifier profile (0 = DARK/hdr-sequence, "
+          "1 = BRIGHT/hdr-sequence2) by hand. Normally rocketdriver-target drives "
+          "this through an upstream event after the Pico confirmed the pattern swap; "
+          "this property is the manual fallback for topologies where that event "
+          "cannot reach pylonsrc. Applied between frames; a later event overrides "
+          "it and the getter reports only the last value set here. Ignored outside "
+          "camera-slave mode.",
           0, 1, PROP_ACTIVE_PROFILE_DEFAULT,
           static_cast<GParamFlags>(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
                                    GST_PARAM_MUTABLE_PLAYING)));
@@ -1981,7 +1985,8 @@ static gboolean gst_pylon_src_event(GstBaseSrc *src, GstEvent *event) {
       self->slave_desired_profile.store(profile, std::memory_order_release);
       GST_LOG_OBJECT(self, "camera-slave: desired profile <- %d (upstream event)",
                      profile);
-      gst_event_unref(event);
+      /* The GstBaseSrc::event vfunc does NOT own the event (gst_base_src_event
+       * unrefs it after we return) - never unref it here. */
       return TRUE;
     }
   }
