@@ -1441,7 +1441,7 @@ gboolean gst_pylon_set_gain(GstPylon *self, gdouble gain, gdouble *applied,
 
     Pylon::CIntegerParameter gainRaw(nodemap, "GainRaw");
     if (gainRaw.IsValid() && gainRaw.IsWritable()) {
-      gainRaw.SetValue(static_cast<gint64>(gain),
+      gainRaw.SetValue(static_cast<gint64>(std::llround(gain)),
                        Pylon::EIntegerValueCorrection::IntegerValueCorrection_Nearest);
       if (applied) *applied = static_cast<gdouble>(gainRaw.GetValue());
       return TRUE;
@@ -2467,16 +2467,19 @@ gboolean gst_pylon_configure_line2(GstPylon *self, gboolean illumination,
 gboolean gst_pylon_configure_camera_slave(GstPylon *self,
                                           gdouble line_debouncer_us,
                                           gint64 grab_timeout_us,
-                                          gboolean gain_controlled,
                                           const gdouble gain[2],
+                                          const gboolean gain_has[2],
+                                          const gboolean gain_clip[2],
                                           gint initial_profile,
                                           gboolean *gain_is_raw,
                                           gdouble *gain_applied,
                                           GError **err) {
   g_return_val_if_fail(self, FALSE);
   g_return_val_if_fail(err && *err == NULL, FALSE);
-  g_return_val_if_fail(!gain_controlled || gain != NULL, FALSE);
+  g_return_val_if_fail(gain != NULL && gain_has != NULL && gain_clip != NULL, FALSE);
   g_return_val_if_fail(initial_profile == 0 || initial_profile == 1, FALSE);
+  const gboolean gain_controlled = gain_has[0] || gain_has[1];
+  if (gain_applied) *gain_applied = -1.0;
 
   try {
     auto &camera = self->camera;
@@ -2611,31 +2614,42 @@ gboolean gst_pylon_configure_camera_slave(GstPylon *self,
       }
 
       for (gint p = 0; p < 2; p++) {
-        if (is_raw && gain[p] != std::floor(gain[p])) {
+        if (!gain_has[p]) continue;
+        const gboolean out_of_range = gain[p] < gmin || gain[p] > gmax;
+        const gboolean fractional = is_raw && gain[p] != std::floor(gain[p]);
+        if ((out_of_range || fractional) && !gain_clip[p]) {
+          /* A configured ':gain' is a typo until proven otherwise: fail fast. */
           g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
-                      "camera-slave: profile %d gain %.2f - this camera only has the "
-                      "integer GainRaw node, use a whole number",
-                      p, gain[p]);
-          return FALSE;
-        }
-        if (gain[p] < gmin || gain[p] > gmax) {
-          g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
-                      "camera-slave: profile %d (%s) gain %.1f outside camera range "
-                      "[%.1f, %.1f] %s",
+                      "camera-slave: profile %d (%s) gain %.2f %s camera range [%.1f, %.1f] %s",
                       p, p == 0 ? "DARK/hdr-sequence" : "BRIGHT/hdr-sequence2", gain[p],
+                      out_of_range ? "outside" : "is not a whole number for the integer GainRaw node;",
                       gmin, gmax, is_raw ? "raw" : "dB");
           return FALSE;
         }
+        if (out_of_range || fractional) {
+          /* A live override is applied the same way at startup as while PLAYING:
+           * clipped / rounded by the camera, with a warning, never a dead pipeline. */
+          GST_WARNING("camera-slave: profile %d override gain %.2f will be %s by the camera "
+                      "(range [%.1f, %.1f] %s)",
+                      p, gain[p], out_of_range ? "clipped" : "rounded", gmin, gmax,
+                      is_raw ? "raw" : "dB");
+        }
       }
 
-      gdouble applied = 0.0;
-      if (!gst_pylon_set_gain(self, gain[initial_profile], &applied, err)) {
-        return FALSE;
-      }
       if (gain_is_raw) *gain_is_raw = is_raw;
-      if (gain_applied) *gain_applied = applied;
-      GST_INFO("camera-slave: initial profile %d Gain = %.1f %s (range [%.1f, %.1f])",
-               initial_profile, applied, is_raw ? "raw" : "dB", gmin, gmax);
+      if (gain_has[initial_profile]) {
+        gdouble applied = 0.0;
+        if (!gst_pylon_set_gain(self, gain[initial_profile], &applied, err)) {
+          return FALSE;
+        }
+        if (gain_applied) *gain_applied = applied;
+        GST_INFO("camera-slave: initial profile %d Gain = %.1f %s (range [%.1f, %.1f])",
+                 initial_profile, applied, is_raw ? "raw" : "dB", gmin, gmax);
+      } else {
+        GST_INFO("camera-slave: initial profile %d has no gain value; camera Gain left as is "
+                 "(range [%.1f, %.1f] %s)",
+                 initial_profile, gmin, gmax, is_raw ? "raw" : "dB");
+      }
     }
 
     self->slave_mode = TRUE;

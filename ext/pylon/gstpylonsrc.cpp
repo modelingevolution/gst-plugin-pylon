@@ -55,6 +55,9 @@
 #include "gstpylonsequence.h"
 
 #include <cmath>
+
+static_assert(std::atomic<gdouble>::is_always_lock_free,
+              "camera-slave gain atomics must be lock-free (GObject struct, no ctor)");
 #include "HdrMetadataPlugin.h"
 #include "HdrProfileSwitcher.h"
 #include "gsthdrmeta.h"
@@ -109,12 +112,14 @@ struct _GstPylonSrc {
    * and GenApi. Everything else below is task-thread-only. */
   std::atomic<gint> slave_desired_profile;   /* -1 none / 0 DARK / 1 BRIGHT */
   gint     slave_classifier_profile;         /* last profile forwarded to the classifier */
-  gboolean slave_gain_parsed_given;          /* some hdr-sequence pair carried ":gain" */
+  gboolean slave_gain_parsed_given[2];       /* hdr-sequence / hdr-sequence2 carried ":gain" */
   gdouble  slave_gain_parsed[2];             /* first-pair gain of hdr-sequence / hdr-sequence2 */
   gboolean slave_gain_prepared;              /* GainAuto=Off done on this camera session */
   gboolean slave_gain_is_raw;                /* GainRaw (integer) instead of Gain (dB) */
   gdouble  slave_gain_on_camera;             /* requested value last written successfully */
+  gdouble  slave_gain_warned_want[2];        /* clip/round warning already given for this value */
   guint    slave_gain_fail_count;            /* rate-limited warnings */
+  guint    slave_gain_failed_generation;     /* override generation at which take-over failed */
   gboolean slave_hdr_profile_warned;         /* "hdr-profile ignored in slave" said once */
   /* dark-gain / bright-gain properties (epic-135 live tuning): an override >= 0
    * replaces the parsed ':gain' of that profile and switches gain control on even
@@ -122,6 +127,7 @@ struct _GstPylonSrc {
    * slave_gain_effective[] is what the task thread resolved (property getter;
    * PROP_SLAVE_GAIN_UNSET while gain control is off). */
   std::atomic<gdouble> slave_gain_override[2];
+  std::atomic<guint>   slave_gain_override_generation;  /* bumped on every override set */
   std::atomic<gdouble> slave_gain_effective[2];
   std::atomic<guint> dropped_frames;
   gint sensor_offset_x;
@@ -538,10 +544,12 @@ static void gst_pylon_src_class_init(GstPylonSrcClass *klass) {
       g_param_spec_double(
           "dark-gain", "Dark Profile Gain (camera-slave)",
           "Camera-slave: camera Gain for the DARK profile (profile 0 / hdr-sequence), changeable "
-          "while PLAYING (dB; raw units on cameras that only have GainRaw). -1 = not set: use the "
-          "':gain' of hdr-sequence, or leave the camera's gain untouched when there is none. A value "
-          ">= 0 switches gain control on even without ':gain'. Reading returns the effective gain "
-          "(-1 while gain control is off).",
+          "while PLAYING (dB; raw units on cameras that only have GainRaw; out-of-range values are "
+          "clipped by the camera with a warning). -1 = not set: use the ':gain' of hdr-sequence; a "
+          "profile with neither is never written. A value >= 0 switches gain control on even without "
+          "':gain'; releasing it again (-1) stops writing and the camera keeps its last gain. Reading "
+          "returns the effective gain (-1 when this profile has no gain value), or the stored "
+          "override while the camera is not configured.",
           PROP_SLAVE_GAIN_UNSET, PROP_SLAVE_GAIN_MAX, PROP_SLAVE_GAIN_UNSET,
           static_cast<GParamFlags>(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
                                    GST_PARAM_MUTABLE_PLAYING)));
@@ -726,11 +734,14 @@ static void gst_pylon_src_init(GstPylonSrc *self) {
   self->basic_applied_profile.store(-1, std::memory_order_relaxed);
   self->slave_desired_profile.store(-1, std::memory_order_relaxed);
   self->slave_classifier_profile = -1;
-  self->slave_gain_parsed_given = FALSE;
+  self->slave_gain_parsed_given[0] = self->slave_gain_parsed_given[1] = FALSE;
   self->slave_gain_parsed[0] = self->slave_gain_parsed[1] = 0.0;
   self->slave_gain_prepared = FALSE;
   self->slave_gain_is_raw = FALSE;
   self->slave_gain_on_camera = 0.0;
+  self->slave_gain_warned_want[0] = self->slave_gain_warned_want[1] = PROP_SLAVE_GAIN_UNSET;
+  self->slave_gain_failed_generation = 0;
+  self->slave_gain_override_generation.store(0, std::memory_order_relaxed);
   self->slave_gain_override[0].store(PROP_SLAVE_GAIN_UNSET, std::memory_order_relaxed);
   self->slave_gain_override[1].store(PROP_SLAVE_GAIN_UNSET, std::memory_order_relaxed);
   self->slave_gain_effective[0].store(PROP_SLAVE_GAIN_UNSET, std::memory_order_relaxed);
@@ -881,6 +892,7 @@ static void gst_pylon_src_set_property(GObject *object, guint property_id,
       gdouble v = g_value_get_double(value);
       if (v < 0.0) v = PROP_SLAVE_GAIN_UNSET;
       self->slave_gain_override[p].store(v, std::memory_order_release);
+      self->slave_gain_override_generation.fetch_add(1, std::memory_order_acq_rel);
       GST_INFO_OBJECT(self, "camera-slave: %s-gain override <- %.1f", p == 0 ? "dark" : "bright", v);
       break;
     }
@@ -1004,11 +1016,15 @@ static void gst_pylon_src_get_property(GObject *object, guint property_id,
       g_value_set_int(value, self->active_profile);
       break;
     case PROP_DARK_GAIN:
-      g_value_set_double(value, self->slave_gain_effective[0].load(std::memory_order_acquire));
+    case PROP_BRIGHT_GAIN: {
+      /* Effective gain while the camera is configured; otherwise the stored
+       * override, so a set/get round trip in NULL/READY sees its own value. */
+      const gint p = (property_id == PROP_DARK_GAIN) ? 0 : 1;
+      gdouble v = self->slave_gain_effective[p].load(std::memory_order_acquire);
+      if (v < 0.0) v = self->slave_gain_override[p].load(std::memory_order_acquire);
+      g_value_set_double(value, v);
       break;
-    case PROP_BRIGHT_GAIN:
-      g_value_set_double(value, self->slave_gain_effective[1].load(std::memory_order_acquire));
-      break;
+    }
     case PROP_DROPPED_FRAMES:
       g_value_set_uint(value,
                        self->dropped_frames.load(std::memory_order_relaxed));
@@ -1457,10 +1473,13 @@ static gboolean gst_pylon_src_set_caps(GstBaseSrc *src, GstCaps *caps) {
      * parsed ':gain'; either source switches gain control on. */
     const gdouble ov0 = self->slave_gain_override[0].load(std::memory_order_acquire);
     const gdouble ov1 = self->slave_gain_override[1].load(std::memory_order_acquire);
-    const gboolean gain_controlled =
-        seq0.gain_given || seq1.gain_given || ov0 >= 0.0 || ov1 >= 0.0;
     const gdouble gain[2] = {ov0 >= 0.0 ? ov0 : seq0.gain[0],
                              ov1 >= 0.0 ? ov1 : seq1.gain[0]};
+    /* Per profile: does it have a gain value at all (a profile without one is
+     * never written), and is that value a live override (clipped, not fatal)? */
+    const gboolean gain_has[2] = {seq0.gain_given || ov0 >= 0.0, seq1.gain_given || ov1 >= 0.0};
+    const gboolean gain_clip[2] = {ov0 >= 0.0, ov1 >= 0.0};
+    const gboolean gain_controlled = gain_has[0] || gain_has[1];
     if (seq0.mixed_gain) {
       GST_WARNING_OBJECT(self,
                          "camera-slave: hdr-sequence pairs carry different gains; "
@@ -1520,29 +1539,34 @@ static gboolean gst_pylon_src_set_caps(GstBaseSrc *src, GstCaps *caps) {
     gdouble gain_applied = 0.0;
     ret = gst_pylon_configure_camera_slave(
         self->pylon, GST_PYLON_SLAVE_LINE_DEBOUNCER_US, grab_timeout_us,
-        gain_controlled, gain, initial_profile, &gain_is_raw, &gain_applied,
+        gain, gain_has, gain_clip, initial_profile, &gain_is_raw, &gain_applied,
         &error);
     if (!ret) {
       action = "configure camera-slave";
       goto log_error;
     }
 
-    self->slave_gain_parsed_given = seq0.gain_given || seq1.gain_given;
+    self->slave_gain_parsed_given[0] = seq0.gain_given;
+    self->slave_gain_parsed_given[1] = seq1.gain_given;
     self->slave_gain_parsed[0] = seq0.gain[0];
     self->slave_gain_parsed[1] = seq1.gain[0];
     self->slave_gain_prepared = gain_controlled;   /* configure did GainAuto=Off */
     self->slave_gain_is_raw = gain_is_raw;
-    self->slave_gain_on_camera = gain[initial_profile];
+    /* What is on the camera: the initial write, or "unknown" (NaN never compares
+     * equal, so the first switch into a profile with a value writes it). */
+    self->slave_gain_on_camera = gain_applied >= 0.0 ? gain[initial_profile] : NAN;
+    self->slave_gain_warned_want[0] = self->slave_gain_warned_want[1] = PROP_SLAVE_GAIN_UNSET;
     self->slave_gain_fail_count = 0;
-    self->slave_gain_effective[0].store(gain_controlled ? gain[0] : PROP_SLAVE_GAIN_UNSET,
+    self->slave_gain_effective[0].store(gain_has[0] ? gain[0] : PROP_SLAVE_GAIN_UNSET,
                                         std::memory_order_release);
-    self->slave_gain_effective[1].store(gain_controlled ? gain[1] : PROP_SLAVE_GAIN_UNSET,
+    self->slave_gain_effective[1].store(gain_has[1] ? gain[1] : PROP_SLAVE_GAIN_UNSET,
                                         std::memory_order_release);
     if (gain_controlled) {
       GST_INFO_OBJECT(self,
-                      "camera-slave: DARK gain %.1f %s, BRIGHT gain %.1f %s, "
-                      "initial profile %d (camera reports %.1f)",
-                      gain[0], gain_is_raw ? "raw" : "dB", gain[1],
+                      "camera-slave: DARK gain %s, BRIGHT gain %s (%s), initial profile %d "
+                      "(camera reports %.1f)",
+                      gain_has[0] ? g_strdup_printf("%.1f", gain[0]) : "none",
+                      gain_has[1] ? g_strdup_printf("%.1f", gain[1]) : "none",
                       gain_is_raw ? "raw" : "dB", initial_profile, gain_applied);
     } else {
       GST_INFO_OBJECT(self,
@@ -1865,7 +1889,7 @@ static gboolean gst_pylon_src_stop(GstBaseSrc *src) {
    * re-announces the live profile within a second. */
   self->slave_desired_profile.store(-1, std::memory_order_release);
   self->slave_classifier_profile = -1;
-  self->slave_gain_parsed_given = FALSE;
+  self->slave_gain_parsed_given[0] = self->slave_gain_parsed_given[1] = FALSE;
   self->slave_gain_prepared = FALSE;
   self->slave_gain_effective[0].store(PROP_SLAVE_GAIN_UNSET, std::memory_order_release);
   self->slave_gain_effective[1].store(PROP_SLAVE_GAIN_UNSET, std::memory_order_release);
@@ -2008,7 +2032,8 @@ static void gst_plyon_src_add_metadata(GstPylonSrc *self, GstBuffer *buf) {
  *     camera, write Gain (never ExposureTime: the Line-1 pulse owns exposure).
  * A failed write retries on the next iteration; equal gains cost one compare. */
 static void gst_pylon_src_slave_sync(GstPylonSrc *self) {
-  const gint d = self->slave_desired_profile.load(std::memory_order_acquire);
+  gint d = self->slave_desired_profile.load(std::memory_order_acquire);
+  if (d < 0) d = self->slave_classifier_profile;   /* no event yet: stay on the configured profile */
   if (d < 0) return;
 
   if (d != self->slave_classifier_profile) {
@@ -2017,33 +2042,42 @@ static void gst_pylon_src_slave_sync(GstPylonSrc *self) {
     GST_INFO_OBJECT(self, "camera-slave: active profile -> %d", d);
   }
 
-  /* Resolve the effective gains: live override (dark-/bright-gain) beats the
-   * parsed ':gain'; either source switches gain control on. */
+  /* Resolve the effective gains: a live override (dark-/bright-gain) beats the
+   * parsed ':gain'; a profile without either is never written. */
   const gdouble ov0 = self->slave_gain_override[0].load(std::memory_order_acquire);
   const gdouble ov1 = self->slave_gain_override[1].load(std::memory_order_acquire);
-  const gboolean controlled = self->slave_gain_parsed_given || ov0 >= 0.0 || ov1 >= 0.0;
-  if (!controlled) return;
-  const gdouble eff0 = ov0 >= 0.0 ? ov0 : self->slave_gain_parsed[0];
-  const gdouble eff1 = ov1 >= 0.0 ? ov1 : self->slave_gain_parsed[1];
-  self->slave_gain_effective[0].store(eff0, std::memory_order_release);
-  self->slave_gain_effective[1].store(eff1, std::memory_order_release);
+  const gboolean has[2] = {self->slave_gain_parsed_given[0] || ov0 >= 0.0,
+                           self->slave_gain_parsed_given[1] || ov1 >= 0.0};
+  const gdouble eff[2] = {ov0 >= 0.0 ? ov0 : self->slave_gain_parsed[0],
+                          ov1 >= 0.0 ? ov1 : self->slave_gain_parsed[1]};
+  self->slave_gain_effective[0].store(has[0] ? eff[0] : PROP_SLAVE_GAIN_UNSET,
+                                      std::memory_order_release);
+  self->slave_gain_effective[1].store(has[1] ? eff[1] : PROP_SLAVE_GAIN_UNSET,
+                                      std::memory_order_release);
+  /* Releasing every override on a sequence without ':gain' = stop writing; the
+   * camera keeps the last gain written (restoring the pre-takeover state would
+   * need a saved GainAuto/Gain, which is not worth the complexity). */
+  if (!has[d]) return;
 
-  const gdouble want = (d == 0) ? eff0 : eff1;
+  const gdouble want = eff[d];
   if (self->slave_gain_prepared && want == self->slave_gain_on_camera) return;
 
   gdouble applied = 0.0;
   GError *e = NULL;
   if (!self->slave_gain_prepared) {
     /* Gain control switched on live (override set on a pipeline whose
-     * hdr-sequence has no ':gain'): take the gain over now, on the task thread. */
+     * hdr-sequence has no ':gain'): take the gain over now, on the task thread.
+     * A camera without a gain node is remembered until the override changes,
+     * instead of re-probing GenApi on every frame. */
+    const guint gen = self->slave_gain_override_generation.load(std::memory_order_acquire);
+    if (self->slave_gain_failed_generation == gen) return;
     gdouble gmin = 0.0, gmax = 0.0;
     gboolean is_raw = FALSE;
     if (!gst_pylon_prepare_gain(self->pylon, &gmin, &gmax, &is_raw, &e)) {
-      if (self->slave_gain_fail_count++ % 50 == 0) {
-        GST_WARNING_OBJECT(self, "camera-slave: cannot take over gain (%u x): %s",
-                           self->slave_gain_fail_count, e ? e->message : "?");
-      }
+      GST_WARNING_OBJECT(self, "camera-slave: cannot take over gain: %s (ignored until "
+                         "dark-/bright-gain changes)", e ? e->message : "?");
       g_clear_error(&e);
+      self->slave_gain_failed_generation = gen;
       return;
     }
     self->slave_gain_is_raw = is_raw;
@@ -2052,9 +2086,10 @@ static void gst_pylon_src_slave_sync(GstPylonSrc *self) {
                     gmin, gmax, is_raw ? "raw" : "dB");
   }
   if (gst_pylon_set_gain(self->pylon, want, &applied, &e)) {
-    if (std::fabs(applied - want) > 0.05) {
-      GST_WARNING_OBJECT(self, "camera-slave: profile %d gain %.1f clipped by the camera to %.1f",
+    if (std::fabs(applied - want) > 0.05 && self->slave_gain_warned_want[d] != want) {
+      GST_WARNING_OBJECT(self, "camera-slave: profile %d gain %.2f clipped/rounded by the camera to %.1f",
                          d, want, applied);
+      self->slave_gain_warned_want[d] = want;
     }
     if (self->slave_gain_fail_count) {
       GST_INFO_OBJECT(self, "camera-slave: Gain write recovered after %u failures",

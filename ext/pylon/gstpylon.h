@@ -130,16 +130,21 @@ gboolean gst_pylon_configure_line2(GstPylon *self, gboolean illumination,
 gboolean gst_pylon_configure_camera_slave(GstPylon *self,
                                           gdouble line_debouncer_us,
                                           gint64 grab_timeout_us,
-                                          gboolean gain_controlled,
                                           const gdouble gain[2],
+                                          const gboolean gain_has[2],
+                                          const gboolean gain_clip[2],
                                           gint initial_profile,
                                           gboolean *gain_is_raw,
                                           gdouble *gain_applied,
                                           GError **err);
-/* epic-135: when gain_controlled, the call also forces GainAuto=Off, range-checks
- * gain[0..1] against the camera's Gain (or GainRaw) limits and writes
- * gain[initial_profile] BEFORE grabbing starts (fail fast on any of those). With
- * gain_controlled == FALSE the camera's gain is left exactly as configured. */
+/* epic-135: gain_has[p] says profile p has a gain value (from ':gain' or a live
+ * override); when any is set the call forces GainAuto=Off, checks each present
+ * gain against the camera's Gain (or GainRaw) range - a configured ':gain' out
+ * of range fails (gain_clip[p]==FALSE), a live override is clipped with a
+ * warning (gain_clip[p]==TRUE) - and writes gain[initial_profile] BEFORE grabbing
+ * starts when that profile has one. Profiles without a value are left alone;
+ * with no gain at all the camera is not touched. *gain_applied < 0 when nothing
+ * was written. */
 
 gdouble gst_pylon_get_device_temperature(GstPylon *self, GError **err);
 
