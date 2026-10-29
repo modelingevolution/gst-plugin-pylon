@@ -6,6 +6,7 @@ endif
 # name, condition when to skip the test and extra dependencies
 pylon_tests = [
   [ 'generic/states' ],
+  [ 'generic/pylonsequence' ],   # epic-135: exposure[:gain] grammar, no camera needed
 ]
 
 test_defines = [
@@ -65,7 +66,7 @@ foreach t : pylon_tests
     env.set('GST_REGISTRY', join_paths(meson.current_build_dir(), '@0@.registry'.format(test_name)))
     env.set('GST_PLUGIN_SCANNER_1_0', gst_plugin_scanner_path)
     exe = executable(test_name, fname, extra_sources,
-      include_directories : [configinc],
+      include_directories : [configinc, include_directories('../../ext/pylon')],
       c_args : ['-DHAVE_CONFIG_H=1' ] + test_defines,
       dependencies : test_deps + extra_deps,
     )

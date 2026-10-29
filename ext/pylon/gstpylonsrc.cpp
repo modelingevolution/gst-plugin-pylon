@@ -52,6 +52,7 @@
 #include "gst/pylon/gstpylonmeta.h"
 #include "gstpylon.h"
 #include "gstpylonsrc.h"
+#include "gstpylonsequence.h"
 #include "HdrMetadataPlugin.h"
 #include "HdrProfileSwitcher.h"
 #include "gsthdrmeta.h"
@@ -98,6 +99,20 @@ struct _GstPylonSrc {
   gboolean basic_configured;
   std::atomic<gint> basic_pending_profile;
   std::atomic<gint> basic_applied_profile;
+  /* Camera-slave profile + per-profile gain (epic-135).
+   * slave_desired_profile is the only cross-thread input: written by the
+   * "rocketdriver-active-profile" upstream event (rocketdriver-target's worker)
+   * or by the active-profile property, consumed on the basesrc task thread
+   * (set_caps / create), which is the only thread that touches HdrMetadataPlugin
+   * and GenApi. Everything else below is task-thread-only. */
+  std::atomic<gint> slave_desired_profile;   /* -1 none / 0 DARK / 1 BRIGHT */
+  gint     slave_classifier_profile;         /* last profile forwarded to the classifier */
+  gboolean slave_gain_controlled;            /* some pair carried an explicit ":gain" */
+  gboolean slave_gain_is_raw;                /* GainRaw (integer) instead of Gain (dB) */
+  gdouble  slave_gain[2];                    /* [0] hdr-sequence/DARK, [1] hdr-sequence2/BRIGHT */
+  gdouble  slave_gain_on_camera;             /* requested value last written successfully */
+  guint    slave_gain_fail_count;            /* rate-limited warnings */
+  gboolean slave_hdr_profile_warned;         /* "hdr-profile ignored in slave" said once */
   std::atomic<guint> dropped_frames;
   gint sensor_offset_x;
   gint sensor_offset_y;
@@ -129,6 +144,7 @@ static gboolean gst_pylon_src_decide_allocation(GstBaseSrc *src,
                                                 GstQuery *query);
 static gboolean gst_pylon_src_start(GstBaseSrc *src);
 static gboolean gst_pylon_src_stop(GstBaseSrc *src);
+static gboolean gst_pylon_src_event(GstBaseSrc *src, GstEvent *event);
 static gboolean gst_pylon_src_unlock(GstBaseSrc *src);
 static gboolean gst_pylon_src_query(GstBaseSrc *src, GstQuery *query);
 static void gst_plyon_src_add_metadata(GstPylonSrc *self, GstBuffer *buf);
@@ -412,7 +428,11 @@ static void gst_pylon_src_class_init(GstPylonSrcClass *klass) {
           "Examples: '19:1.2,150:2.5' (with gains), '19,150' (gains default to 0), '19:1.2,150' (mixed). "
           "Setting this property will automatically configure the camera's sequencer mode. "
           "Each exposure:gain pair will be assigned to a sequencer set, cycling through them continuously. "
-          "Leave empty to disable sequencer mode.",
+          "Leave empty to disable sequencer mode. "
+          "In mode=camera-slave the exposures are the classifier's expected frame-times (must equal "
+          "rocketdriver-target's dark-camera pattern) and, when any pair carries ':gain', the first pair's "
+          "gain is the DARK profile's camera Gain (dB; raw units on cameras with only GainRaw), written on "
+          "every profile switch. Without ':gain' the camera's gain is left untouched.",
           PROP_HDR_SEQUENCE_DEFAULT,
           static_cast<GParamFlags>(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
                                    GST_PARAM_MUTABLE_READY)));
@@ -427,7 +447,9 @@ static void gst_pylon_src_class_init(GstPylonSrcClass *klass) {
           "Examples: '5000:2.5,10000:3.0' (with gains), '5000,10000' (gains default to 0). "
           "When both hdr-sequence and hdr-sequence2 are set, dual profile mode is enabled "
           "allowing runtime switching between profiles via the hdr-profile property. "
-          "Leave empty to use single profile mode.",
+          "Leave empty to use single profile mode. "
+          "In mode=camera-slave this is the BRIGHT profile (rocketdriver-target's bright-camera pattern); "
+          "empty mirrors hdr-sequence. The first pair's ':gain' is the BRIGHT profile's camera Gain.",
           PROP_HDR_SEQUENCE2_DEFAULT,
           static_cast<GParamFlags>(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
                                    GST_PARAM_MUTABLE_READY)));
@@ -626,6 +648,7 @@ static void gst_pylon_src_class_init(GstPylonSrcClass *klass) {
   base_src_class->stop = GST_DEBUG_FUNCPTR(gst_pylon_src_stop);
   base_src_class->unlock = GST_DEBUG_FUNCPTR(gst_pylon_src_unlock);
   base_src_class->query = GST_DEBUG_FUNCPTR(gst_pylon_src_query);
+  base_src_class->event = GST_DEBUG_FUNCPTR(gst_pylon_src_event);
   push_src_class->create = GST_DEBUG_FUNCPTR(gst_pylon_src_create);
 }
 
@@ -659,6 +682,14 @@ static void gst_pylon_src_init(GstPylonSrc *self) {
   self->basic_configured = FALSE;
   self->basic_pending_profile.store(-1, std::memory_order_relaxed);
   self->basic_applied_profile.store(-1, std::memory_order_relaxed);
+  self->slave_desired_profile.store(-1, std::memory_order_relaxed);
+  self->slave_classifier_profile = -1;
+  self->slave_gain_controlled = FALSE;
+  self->slave_gain_is_raw = FALSE;
+  self->slave_gain[0] = self->slave_gain[1] = 0.0;
+  self->slave_gain_on_camera = 0.0;
+  self->slave_gain_fail_count = 0;
+  self->slave_hdr_profile_warned = FALSE;
   self->dropped_frames.store(0, std::memory_order_relaxed);
   self->sensor_offset_x = PROP_SENSOR_OFFSET_X_DEFAULT;
   self->sensor_offset_y = PROP_SENSOR_OFFSET_Y_DEFAULT;
@@ -724,7 +755,18 @@ static void gst_pylon_src_set_property(GObject *object, guint property_id,
     case PROP_HDR_PROFILE:
       {
         gint new_profile = g_value_get_int(value);
-        if (new_profile >= 0 && new_profile <= 1) {
+        if (new_profile >= 0 && new_profile <= 1 &&
+            self->mode == GST_PYLON_MODE_CAMERA_SLAVE) {
+          /* epic-135: in camera-slave the profile follows rocketdriver-target
+           * (upstream event) or the active-profile property. A SoftwareSignal
+           * pulse is meaningless with the sequencer off, and a second writer
+           * would bypass invert-profile and the Pico APPLY result. */
+          if (!self->slave_hdr_profile_warned) {
+            GST_WARNING_OBJECT(self, "hdr-profile is ignored in mode=camera-slave; the "
+                               "profile follows rocketdriver-target (or active-profile)");
+            self->slave_hdr_profile_warned = TRUE;
+          }
+        } else if (new_profile >= 0 && new_profile <= 1) {
           if (self->basic_camera) {
             /* Basic mode: publish the request only. The nodemap write happens on
              * the capture thread in create(), so GenApi access stays on a single
@@ -777,12 +819,12 @@ static void gst_pylon_src_set_property(GObject *object, guint property_id,
     case PROP_ACTIVE_PROFILE: {
       gint profile = g_value_get_int(value);
       self->active_profile = profile;
-      /* Publish to the live classifier (§2.5). SetActiveProfile only stores an
-       * atomic pending value, safe to call from the target's worker thread. */
-      if (self->hdr_plugin) {
-        self->hdr_plugin->SetActiveProfile(profile);
-      }
-      GST_INFO_OBJECT(self, "Camera-slave active-profile set to %d", profile);
+      /* epic-135: record the request only. HdrMetadataPlugin::provider_ is
+       * replaced in set_caps and freed in stop() on the task thread, so it must
+       * never be touched from a setter; the task thread consumes this atomic in
+       * set_caps (initial profile) and at the top of every create() iteration. */
+      self->slave_desired_profile.store(profile, std::memory_order_release);
+      GST_INFO_OBJECT(self, "Camera-slave active-profile requested: %d", profile);
       break;
     }
     case PROP_SENSOR_OFFSET_X:
@@ -1135,42 +1177,6 @@ static void gst_pylon_src_enable_hdr_chunks(GstPylonSrc *self) {
 }
 
 /* notify the subclass of new caps */
-/* Basic mode: take the FIRST "exposure[:gain]" pair of a sequence string.
- * Returns FALSE when the string is empty or the exposure is not a positive
- * number. Any further pairs are deliberately ignored - basic mode has no
- * bracketing - but the caller warns so nobody thinks HDR is still running. */
-static gboolean gst_pylon_src_parse_first_pair(const gchar *sequence,
-                                               gdouble *exposure, gdouble *gain,
-                                               guint *num_pairs) {
-  gchar **steps = NULL;
-  gchar **parts = NULL;
-  gboolean ok = FALSE;
-
-  *exposure = 0.0;
-  *gain = 0.0;
-  *num_pairs = 0;
-
-  if (!sequence || strlen(sequence) == 0) return FALSE;
-
-  steps = g_strsplit(sequence, ",", -1);
-  *num_pairs = g_strv_length(steps);
-  if (*num_pairs == 0) {
-    g_strfreev(steps);
-    return FALSE;
-  }
-
-  parts = g_strsplit(g_strstrip(steps[0]), ":", 2);
-  if (parts[0] && strlen(g_strstrip(parts[0])) > 0) {
-    *exposure = g_strtod(parts[0], NULL);
-    *gain = parts[1] ? g_strtod(parts[1], NULL) : 0.0;
-    ok = (*exposure > 0.0);
-  }
-
-  g_strfreev(parts);
-  g_strfreev(steps);
-  return ok;
-}
-
 static gboolean gst_pylon_src_set_caps(GstBaseSrc *src, GstCaps *caps) {
   GstPylonSrc *self = GST_PYLON_SRC(src);
   GstStructure *st = NULL;
@@ -1243,27 +1249,48 @@ static gboolean gst_pylon_src_set_caps(GstBaseSrc *src, GstCaps *caps) {
       goto error;
     }
 
-    if (!gst_pylon_src_parse_first_pair(self->hdr_sequence, &exp0, &gain0,
-                                        &n0)) {
-      error_msg = g_strdup(
-          "basic-camera requires hdr-sequence to hold at least one positive "
-          "'exposure[:gain]' pair (profile 0 / DARK)");
-      action = "configure basic mode";
-      goto error;
-    }
-
-    /* hdr-sequence2 is optional: without it both profiles resolve to the same
-     * exposure, which makes switching a no-op but is not an error (a pipeline
-     * may legitimately run a single fixed exposure). */
-    if (!gst_pylon_src_parse_first_pair(self->hdr_sequence2, &exp1, &gain1,
-                                        &n1)) {
-      exp1 = exp0;
-      gain1 = gain0;
-      GST_WARNING_OBJECT(self,
-                         "basic-camera: hdr-sequence2 is empty, profile 1 "
-                         "falls back to profile 0 (%.2f us) - switching will "
-                         "have no visible effect",
-                         exp1);
+    {
+      GstPylonSequence seq0, seq1;
+      gchar *perr = NULL;
+      if (!gst_pylon_sequence_parse(self->hdr_sequence, &seq0, &perr)) {
+        error_msg = g_strdup_printf("basic-camera: invalid hdr-sequence: %s", perr);
+        g_free(perr);
+        action = "configure basic mode";
+        goto error;
+      }
+      if (seq0.count == 0) {
+        error_msg = g_strdup(
+            "basic-camera requires hdr-sequence to hold at least one positive "
+            "'exposure[:gain]' pair (profile 0 / DARK)");
+        action = "configure basic mode";
+        goto error;
+      }
+      if (!gst_pylon_sequence_parse(self->hdr_sequence2, &seq1, &perr)) {
+        error_msg = g_strdup_printf("basic-camera: invalid hdr-sequence2: %s", perr);
+        g_free(perr);
+        action = "configure basic mode";
+        goto error;
+      }
+      exp0 = seq0.exposure[0];
+      gain0 = seq0.gain[0];
+      n0 = seq0.count;
+      /* hdr-sequence2 is optional: without it both profiles resolve to the same
+       * exposure, which makes switching a no-op but is not an error (a pipeline
+       * may legitimately run a single fixed exposure). */
+      if (seq1.count == 0) {
+        exp1 = exp0;
+        gain1 = gain0;
+        n1 = 0;
+        GST_WARNING_OBJECT(self,
+                           "basic-camera: hdr-sequence2 is empty, profile 1 "
+                           "falls back to profile 0 (%.2f us) - switching will "
+                           "have no visible effect",
+                           exp1);
+      } else {
+        exp1 = seq1.exposure[0];
+        gain1 = seq1.gain[0];
+        n1 = seq1.count;
+      }
     }
 
     if (n0 > 1 || n1 > 1) {
@@ -1325,31 +1352,69 @@ static gboolean gst_pylon_src_set_caps(GstBaseSrc *src, GstCaps *caps) {
      * Line-1 trigger-width setup; the same hdr-sequence/hdr-sequence2 lists become
      * the classifier's expected exposures (NOT written to a camera sequencer). */
   } else if (mode == GST_PYLON_MODE_CAMERA_SLAVE) {
-    if (!self->hdr_sequence || strlen(self->hdr_sequence) == 0) {
+    /* epic-135: hdr-sequence (profile 0 / DARK) and hdr-sequence2 (profile 1 /
+     * BRIGHT) carry "exposure[:gain]". The exposures are the classifier's
+     * expected frame-times (must equal rocketdriver-target's dark-/bright-camera
+     * pattern); the FIRST pair's gain is the profile's camera Gain, and gain
+     * control is opt-in: no ":gain" anywhere -> the camera's gain is untouched. */
+    GstPylonSequence seq0, seq1;
+    gchar *perr = NULL;
+
+    if (!gst_pylon_sequence_parse(self->hdr_sequence, &seq0, &perr)) {
+      error_msg = g_strdup_printf("camera-slave: invalid hdr-sequence: %s", perr);
+      g_free(perr);
+      action = "configure camera-slave";
+      goto error;
+    }
+    if (seq0.count == 0) {
       error_msg = g_strdup(
           "camera-slave mode requires hdr-sequence (expected exposures for "
           "classification)");
       action = "configure camera-slave";
       goto error;
     }
+    if (!gst_pylon_sequence_parse(self->hdr_sequence2, &seq1, &perr)) {
+      error_msg = g_strdup_printf("camera-slave: invalid hdr-sequence2: %s", perr);
+      g_free(perr);
+      action = "configure camera-slave";
+      goto error;
+    }
+    if (seq1.count == 0) {
+      /* The slave classifier DROPS every frame of a profile without an expected
+       * list (WindowSize()==0). Now that rocketdriver-target really selects
+       * profile 1, an unmirrored single-list pipeline would go black in BRIGHT. */
+      seq1 = seq0;
+      GST_WARNING_OBJECT(self,
+                         "camera-slave: hdr-sequence2 empty - profile 1 (BRIGHT) "
+                         "mirrors profile 0 (valid only while rocketdriver-target "
+                         "bright-camera == dark-camera)");
+    }
+
+    const gboolean gain_controlled = seq0.gain_given || seq1.gain_given;
+    const gdouble gain[2] = {seq0.gain[0], seq1.gain[0]};
+    if (seq0.mixed_gain) {
+      GST_WARNING_OBJECT(self,
+                         "camera-slave: hdr-sequence pairs carry different gains; "
+                         "slave mode applies one gain per profile - using the "
+                         "first (%.1f)",
+                         gain[0]);
+    }
+    if (seq1.mixed_gain) {
+      GST_WARNING_OBJECT(self,
+                         "camera-slave: hdr-sequence2 pairs carry different gains; "
+                         "slave mode applies one gain per profile - using the "
+                         "first (%.1f)",
+                         gain[1]);
+    }
 
     std::vector<guint32> profile0_exposures;
     std::vector<guint32> profile1_exposures;
     std::vector<guint32> adjusted0, adjusted1;
-
-    {
-      gchar **exposures = g_strsplit(self->hdr_sequence, ",", -1);
-      for (int i = 0; exposures[i]; i++) {
-        profile0_exposures.push_back(g_ascii_strtoull(exposures[i], NULL, 10));
-      }
-      g_strfreev(exposures);
+    for (guint i = 0; i < seq0.count; i++) {
+      profile0_exposures.push_back(static_cast<guint32>(seq0.exposure[i]));
     }
-    if (self->hdr_sequence2 && strlen(self->hdr_sequence2) > 0) {
-      gchar **exposures = g_strsplit(self->hdr_sequence2, ",", -1);
-      for (int i = 0; exposures[i]; i++) {
-        profile1_exposures.push_back(g_ascii_strtoull(exposures[i], NULL, 10));
-      }
-      g_strfreev(exposures);
+    for (guint i = 0; i < seq1.count; i++) {
+      profile1_exposures.push_back(static_cast<guint32>(seq1.exposure[i]));
     }
 
     /* Provision the live classifier with the expected exposures. */
@@ -1360,8 +1425,14 @@ static gboolean gst_pylon_src_set_caps(GstBaseSrc *src, GstCaps *caps) {
       goto error;
     }
 
-    /* Apply the pending active-profile (may have been set before caps). */
-    self->hdr_plugin->SetActiveProfile(self->active_profile);
+    /* Initial profile = whatever rocketdriver-target (event) or active-profile
+     * requested so far, else DARK - the pattern rocketdriver-target applies at
+     * NULL->READY. Forwarded to the classifier HERE, on the task thread that owns
+     * it (never from a setter). */
+    gint initial_profile = self->slave_desired_profile.load(std::memory_order_acquire);
+    if (initial_profile < 0) initial_profile = 0;
+    self->hdr_plugin->SetActiveProfile(initial_profile);
+    self->slave_classifier_profile = initial_profile;
 
     /* Enable chunks so ChunkExposureTime flows for classification. */
     gst_pylon_src_enable_hdr_chunks(self);
@@ -1376,14 +1447,35 @@ static gboolean gst_pylon_src_set_caps(GstBaseSrc *src, GstCaps *caps) {
       grab_timeout_us = 3 * static_cast<gint64>(period_ns / 1000);
     }
 
+    gboolean gain_is_raw = FALSE;
+    gdouble gain_applied = 0.0;
     ret = gst_pylon_configure_camera_slave(
-        self->pylon, GST_PYLON_SLAVE_LINE_DEBOUNCER_US, grab_timeout_us, &error);
-    if (ret) {
-      GST_INFO_OBJECT(self, "Camera-slave mode configured successfully");
-    } else {
+        self->pylon, GST_PYLON_SLAVE_LINE_DEBOUNCER_US, grab_timeout_us,
+        gain_controlled, gain, initial_profile, &gain_is_raw, &gain_applied,
+        &error);
+    if (!ret) {
       action = "configure camera-slave";
       goto log_error;
     }
+
+    self->slave_gain_controlled = gain_controlled;
+    self->slave_gain_is_raw = gain_is_raw;
+    self->slave_gain[0] = gain[0];
+    self->slave_gain[1] = gain[1];
+    self->slave_gain_on_camera = gain[initial_profile];
+    self->slave_gain_fail_count = 0;
+    if (gain_controlled) {
+      GST_INFO_OBJECT(self,
+                      "camera-slave: DARK gain %.1f %s, BRIGHT gain %.1f %s, "
+                      "initial profile %d (camera reports %.1f)",
+                      gain[0], gain_is_raw ? "raw" : "dB", gain[1],
+                      gain_is_raw ? "raw" : "dB", initial_profile, gain_applied);
+    } else {
+      GST_INFO_OBJECT(self,
+                      "camera-slave: no :gain in hdr-sequence(2) - camera Gain "
+                      "left as configured");
+    }
+    GST_INFO_OBJECT(self, "Camera-slave mode configured successfully");
   } else if (self->hdr_sequence && strlen(self->hdr_sequence) > 0) {
     // Parse sequences
     std::vector<guint32> profile0_exposures;
@@ -1694,6 +1786,12 @@ static gboolean gst_pylon_src_stop(GstBaseSrc *src) {
   if (self->hdr_plugin) {
     self->hdr_plugin->Reset();
   }
+  /* epic-135: forget the slave profile so a restarted pipeline starts on DARK
+   * (what rocketdriver-target applies at NULL->READY); its 1 Hz keepalive
+   * re-announces the live profile within a second. */
+  self->slave_desired_profile.store(-1, std::memory_order_release);
+  self->slave_classifier_profile = -1;
+  self->slave_gain_controlled = FALSE;
   if (self->hdr_switcher) {
     self->hdr_switcher->Reset();
   }
@@ -1826,6 +1924,70 @@ static void gst_plyon_src_add_metadata(GstPylonSrc *self, GstBuffer *buf) {
                                  stride);
 }
 
+/* epic-135 camera-slave: consume the desired profile between grabs. Task thread
+ * only - the one thread that owns HdrMetadataPlugin::provider_ and GenApi.
+ *  1. forward a changed profile to the classifier (window scope);
+ *  2. if gain control is on and the profile's gain differs from what is on the
+ *     camera, write Gain (never ExposureTime: the Line-1 pulse owns exposure).
+ * A failed write retries on the next iteration; equal gains cost one compare. */
+static void gst_pylon_src_slave_sync(GstPylonSrc *self) {
+  const gint d = self->slave_desired_profile.load(std::memory_order_acquire);
+  if (d < 0) return;
+
+  if (d != self->slave_classifier_profile) {
+    if (self->hdr_plugin) self->hdr_plugin->SetActiveProfile(d);
+    self->slave_classifier_profile = d;
+    GST_INFO_OBJECT(self, "camera-slave: active profile -> %d", d);
+  }
+
+  if (!self->slave_gain_controlled) return;
+  const gdouble want = self->slave_gain[d];
+  if (want == self->slave_gain_on_camera) return;
+
+  gdouble applied = 0.0;
+  GError *e = NULL;
+  if (gst_pylon_set_gain(self->pylon, want, &applied, &e)) {
+    if (self->slave_gain_fail_count) {
+      GST_INFO_OBJECT(self, "camera-slave: Gain write recovered after %u failures",
+                      self->slave_gain_fail_count);
+    }
+    GST_INFO_OBJECT(self, "camera-slave: profile %d -> Gain %.1f %s (was %.1f)", d,
+                    applied, self->slave_gain_is_raw ? "raw" : "dB",
+                    self->slave_gain_on_camera);
+    self->slave_gain_on_camera = want;
+    self->slave_gain_fail_count = 0;
+  } else {
+    if (self->slave_gain_fail_count++ % 50 == 0) { /* ~1/s at 45 fps */
+      GST_WARNING_OBJECT(self,
+                         "camera-slave: Gain write for profile %d failed (%u x), "
+                         "retrying next frame: %s",
+                         d, self->slave_gain_fail_count, e ? e->message : "?");
+    }
+    g_clear_error(&e);
+  }
+}
+
+/* epic-135: upstream custom event from rocketdriver-target announcing the
+ * schedule index live on the Pico. Runs on the SENDER's thread: store only. */
+static gboolean gst_pylon_src_event(GstBaseSrc *src, GstEvent *event) {
+  GstPylonSrc *self = GST_PYLON_SRC(src);
+
+  if (GST_EVENT_TYPE(event) == GST_EVENT_CUSTOM_UPSTREAM) {
+    const GstStructure *st = gst_event_get_structure(event);
+    gint profile = -1;
+    if (st && gst_structure_has_name(st, "rocketdriver-active-profile") &&
+        gst_structure_get_int(st, "profile", &profile) &&
+        (profile == 0 || profile == 1)) {
+      self->slave_desired_profile.store(profile, std::memory_order_release);
+      GST_LOG_OBJECT(self, "camera-slave: desired profile <- %d (upstream event)",
+                     profile);
+      gst_event_unref(event);
+      return TRUE;
+    }
+  }
+  return GST_BASE_SRC_CLASS(gst_pylon_src_parent_class)->event(src, event);
+}
+
 /* ask the subclass to create a buffer with offset and size, the default
  * implementation will call alloc and fill. */
 static GstFlowReturn gst_pylon_src_create(GstPushSrc *src, GstBuffer **buf) {
@@ -1893,6 +2055,8 @@ static GstFlowReturn gst_pylon_src_create(GstPushSrc *src, GstBuffer **buf) {
   /* Slave mode re-grabs frames whose exposure does not classify (§2.4); other
    * modes run this body exactly once (break at the end). */
   while (TRUE) {
+  if (mode == GST_PYLON_MODE_CAMERA_SLAVE) gst_pylon_src_slave_sync(self);
+
   pylon_ret = gst_pylon_capture(
       self->pylon, buf, static_cast<GstPylonCaptureErrorEnum>(capture_error),
       &self->error_count, &error);

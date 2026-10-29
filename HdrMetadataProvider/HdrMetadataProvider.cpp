@@ -94,8 +94,13 @@ bool HdrMetadataProvider::ProcessFrameSlave(uint64_t frameId,
     const int pending = _pendingActiveProfile.load(std::memory_order_acquire);
     const uint8_t profile = (pending == 1) ? 1 : 0;
     if (profile != _activeProfile) {
+        // epic-135: when the newly selected profile expects exactly the same
+        // frame-time list (mirrored / equal patterns) the ring geometry does not
+        // change, so keep the window phase instead of re-basing at an arbitrary
+        // frame. Only a genuinely different list starts a fresh window.
+        const bool same = GetProfile(profile).Exposures == GetProfile(_activeProfile).Exposures;
         _activeProfile = profile;
-        _forceNewWindow = true;
+        if (!same) _forceNewWindow = true;
     }
 
     const ProfileInfo& p = GetProfile(_activeProfile);

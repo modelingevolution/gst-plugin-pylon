@@ -1351,21 +1351,18 @@ gboolean gst_pylon_set_exposure_gain(GstPylon *self, gdouble exposure_us,
       GST_INFO("basic mode: ExposureTime = %.2f us", applied_exposure);
     }
 
-    Pylon::CFloatParameter gainFloat(nodemap, "Gain");
-    if (gainFloat.IsValid() && gainFloat.IsWritable()) {
-      gainFloat.SetValue(
-          gain, Pylon::EFloatValueCorrection::FloatValueCorrection_ClipToRange);
-      GST_INFO("basic mode: Gain = %.2f", gainFloat.GetValue());
-    } else {
-      Pylon::CIntegerParameter gainRaw(nodemap, "GainRaw");
-      if (gainRaw.IsValid() && gainRaw.IsWritable()) {
-        gainRaw.SetValue(static_cast<gint64>(gain),
-                         Pylon::EIntegerValueCorrection::IntegerValueCorrection_Nearest);
-        GST_INFO("basic mode: GainRaw = %ld",
-                 static_cast<long>(gainRaw.GetValue()));
+    /* Gain is best-effort in basic mode (unchanged behaviour): a camera without a
+     * writable gain node only warns when a non-zero gain was asked for. */
+    {
+      gdouble applied_gain = 0.0;
+      GError *gain_err = NULL;
+      if (gst_pylon_set_gain(self, gain, &applied_gain, &gain_err)) {
+        GST_INFO("basic mode: Gain = %.2f", applied_gain);
       } else if (gain != 0.0) {
-        GST_WARNING("basic mode: Gain not writable, gain=%.2f ignored", gain);
+        GST_WARNING("basic mode: Gain not writable, gain=%.2f ignored (%s)", gain,
+                    gain_err ? gain_err->message : "no Gain/GainRaw node");
       }
+      g_clear_error(&gain_err);
     }
 
     return TRUE;
@@ -1373,6 +1370,40 @@ gboolean gst_pylon_set_exposure_gain(GstPylon *self, gdouble exposure_us,
   } catch (const Pylon::GenericException &e) {
     g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
                 "Failed to set exposure/gain: %s", e.GetDescription());
+    return FALSE;
+  }
+}
+
+gboolean gst_pylon_set_gain(GstPylon *self, gdouble gain, gdouble *applied,
+                            GError **err) {
+  g_return_val_if_fail(self, FALSE);
+  g_return_val_if_fail(err && *err == NULL, FALSE);
+
+  try {
+    GenApi::INodeMap &nodemap = self->camera->GetNodeMap();
+
+    Pylon::CFloatParameter gainFloat(nodemap, "Gain");
+    if (gainFloat.IsValid() && gainFloat.IsWritable()) {
+      gainFloat.SetValue(
+          gain, Pylon::EFloatValueCorrection::FloatValueCorrection_ClipToRange);
+      if (applied) *applied = gainFloat.GetValue();
+      return TRUE;
+    }
+
+    Pylon::CIntegerParameter gainRaw(nodemap, "GainRaw");
+    if (gainRaw.IsValid() && gainRaw.IsWritable()) {
+      gainRaw.SetValue(static_cast<gint64>(gain),
+                       Pylon::EIntegerValueCorrection::IntegerValueCorrection_Nearest);
+      if (applied) *applied = static_cast<gdouble>(gainRaw.GetValue());
+      return TRUE;
+    }
+
+    g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
+                "Camera has no writable Gain/GainRaw parameter");
+    return FALSE;
+  } catch (const Pylon::GenericException &e) {
+    g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
+                "Failed to set gain: %s", e.GetDescription());
     return FALSE;
   }
 }
@@ -2386,9 +2417,17 @@ gboolean gst_pylon_configure_line2(GstPylon *self, gboolean illumination,
 
 gboolean gst_pylon_configure_camera_slave(GstPylon *self,
                                           gdouble line_debouncer_us,
-                                          gint64 grab_timeout_us, GError **err) {
+                                          gint64 grab_timeout_us,
+                                          gboolean gain_controlled,
+                                          const gdouble gain[2],
+                                          gint initial_profile,
+                                          gboolean *gain_is_raw,
+                                          gdouble *gain_applied,
+                                          GError **err) {
   g_return_val_if_fail(self, FALSE);
   g_return_val_if_fail(err && *err == NULL, FALSE);
+  g_return_val_if_fail(!gain_controlled || gain != NULL, FALSE);
+  g_return_val_if_fail(initial_profile == 0 || initial_profile == 1, FALSE);
 
   try {
     auto &camera = self->camera;
@@ -2508,6 +2547,62 @@ gboolean gst_pylon_configure_camera_slave(GstPylon *self,
     /* Pico owns the illuminator: keep the camera LED lines off (DEC-4). */
     if (!gst_pylon_configure_line2(self, FALSE, err)) {
       return FALSE;
+    }
+
+    /* epic-135: per-profile camera gain, opt-in. Only when the operator put an
+     * explicit ":gain" into hdr-sequence(2) do we take the gain over; otherwise
+     * the camera keeps whatever its user set holds (existing pipelines unchanged).
+     * Everything here happens BEFORE StartGrabbing, so frame 1 already carries
+     * the initial profile's gain. */
+    if (gain_controlled) {
+      GenApi::INodeMap &nodemap = camera->GetNodeMap();
+
+      Pylon::CEnumParameter gainAuto(nodemap, "GainAuto");
+      if (gainAuto.IsValid() && gainAuto.CanSetValue("Off")) {
+        gainAuto.SetValue("Off");
+        GST_INFO("camera-slave: GainAuto = Off");
+      } else if (gainAuto.IsValid()) {
+        GST_WARNING("camera-slave: cannot set GainAuto=Off - auto gain may override "
+                    "the per-profile gain");
+      }
+
+      gdouble gmin = 0.0, gmax = 0.0;
+      gboolean is_raw = FALSE;
+      Pylon::CFloatParameter gainFloat(nodemap, "Gain");
+      Pylon::CIntegerParameter gainRaw(nodemap, "GainRaw");
+      if (gainFloat.IsValid() && gainFloat.IsWritable()) {
+        gmin = gainFloat.GetMin();
+        gmax = gainFloat.GetMax();
+      } else if (gainRaw.IsValid() && gainRaw.IsWritable()) {
+        gmin = static_cast<gdouble>(gainRaw.GetMin());
+        gmax = static_cast<gdouble>(gainRaw.GetMax());
+        is_raw = TRUE;
+      } else {
+        g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
+                    "camera-slave: hdr-sequence carries ':gain' but the camera has no "
+                    "writable Gain/GainRaw parameter");
+        return FALSE;
+      }
+
+      for (gint p = 0; p < 2; p++) {
+        if (gain[p] < gmin || gain[p] > gmax) {
+          g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
+                      "camera-slave: profile %d (%s) gain %.1f outside camera range "
+                      "[%.1f, %.1f] %s",
+                      p, p == 0 ? "DARK/hdr-sequence" : "BRIGHT/hdr-sequence2", gain[p],
+                      gmin, gmax, is_raw ? "raw" : "dB");
+          return FALSE;
+        }
+      }
+
+      gdouble applied = 0.0;
+      if (!gst_pylon_set_gain(self, gain[initial_profile], &applied, err)) {
+        return FALSE;
+      }
+      if (gain_is_raw) *gain_is_raw = is_raw;
+      if (gain_applied) *gain_applied = applied;
+      GST_INFO("camera-slave: initial profile %d Gain = %.1f %s (range [%.1f, %.1f])",
+               initial_profile, applied, is_raw ? "raw" : "dB", gmin, gmax);
     }
 
     self->slave_mode = TRUE;

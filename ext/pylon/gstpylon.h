@@ -96,6 +96,12 @@ gboolean gst_pylon_configure_basic_exposure(GstPylon *self, gint offset_x,
                                             gint offset_y, GError **err);
 gboolean gst_pylon_set_exposure_gain(GstPylon *self, gdouble exposure_us,
                                      gdouble gain, GError **err);
+/* Gain-only write (float "Gain", else integer "GainRaw"): clips to the live
+ * range, reads back into *applied. Never touches ExposureTime, so it is the one
+ * to use under ExposureMode=TriggerWidth (camera-slave), where ExposureTime is
+ * not writable. FALSE + err when the camera has no writable gain node. */
+gboolean gst_pylon_set_gain(GstPylon *self, gdouble gain, gdouble *applied,
+                            GError **err);
 gchar *gst_pylon_camera_get_string_properties();
 gchar *gst_pylon_stream_grabber_get_string_properties();
 
@@ -116,7 +122,17 @@ gboolean gst_pylon_configure_line2(GstPylon *self, gboolean illumination,
  * debouncer (<= 5 us). */
 gboolean gst_pylon_configure_camera_slave(GstPylon *self,
                                           gdouble line_debouncer_us,
-                                          gint64 grab_timeout_us, GError **err);
+                                          gint64 grab_timeout_us,
+                                          gboolean gain_controlled,
+                                          const gdouble gain[2],
+                                          gint initial_profile,
+                                          gboolean *gain_is_raw,
+                                          gdouble *gain_applied,
+                                          GError **err);
+/* epic-135: when gain_controlled, the call also forces GainAuto=Off, range-checks
+ * gain[0..1] against the camera's Gain (or GainRaw) limits and writes
+ * gain[initial_profile] BEFORE grabbing starts (fail fast on any of those). With
+ * gain_controlled == FALSE the camera's gain is left exactly as configured. */
 
 gdouble gst_pylon_get_device_temperature(GstPylon *self, GError **err);
 
