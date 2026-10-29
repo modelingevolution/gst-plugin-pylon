@@ -1380,6 +1380,49 @@ gboolean gst_pylon_set_exposure_gain(GstPylon *self, gdouble exposure_us,
   }
 }
 
+gboolean gst_pylon_prepare_gain(GstPylon *self, gdouble *gain_min,
+                                gdouble *gain_max, gboolean *is_raw,
+                                GError **err) {
+  g_return_val_if_fail(self, FALSE);
+  g_return_val_if_fail(err && *err == NULL, FALSE);
+
+  try {
+    GenApi::INodeMap &nodemap = self->camera->GetNodeMap();
+
+    Pylon::CEnumParameter gainAuto(nodemap, "GainAuto");
+    if (gainAuto.IsValid() && gainAuto.CanSetValue("Off")) {
+      gainAuto.SetValue("Off");
+      GST_INFO("camera-slave: GainAuto = Off");
+    } else if (gainAuto.IsValid()) {
+      GST_WARNING("camera-slave: cannot set GainAuto=Off - auto gain may override "
+                  "the per-profile gain");
+    }
+
+    Pylon::CFloatParameter gainFloat(nodemap, "Gain");
+    if (gainFloat.IsValid() && gainFloat.IsWritable()) {
+      if (gain_min) *gain_min = gainFloat.GetMin();
+      if (gain_max) *gain_max = gainFloat.GetMax();
+      if (is_raw) *is_raw = FALSE;
+      return TRUE;
+    }
+    Pylon::CIntegerParameter gainRaw(nodemap, "GainRaw");
+    if (gainRaw.IsValid() && gainRaw.IsWritable()) {
+      if (gain_min) *gain_min = static_cast<gdouble>(gainRaw.GetMin());
+      if (gain_max) *gain_max = static_cast<gdouble>(gainRaw.GetMax());
+      if (is_raw) *is_raw = TRUE;
+      return TRUE;
+    }
+    g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
+                "camera-slave: gain requested but the camera has no writable "
+                "Gain/GainRaw parameter");
+    return FALSE;
+  } catch (const Pylon::GenericException &e) {
+    g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
+                "Failed to prepare gain control: %s", e.GetDescription());
+    return FALSE;
+  }
+}
+
 gboolean gst_pylon_set_gain(GstPylon *self, gdouble gain, gdouble *applied,
                             GError **err) {
   g_return_val_if_fail(self, FALSE);
@@ -2561,32 +2604,9 @@ gboolean gst_pylon_configure_camera_slave(GstPylon *self,
      * Everything here happens BEFORE StartGrabbing, so frame 1 already carries
      * the initial profile's gain. */
     if (gain_controlled) {
-      GenApi::INodeMap &nodemap = camera->GetNodeMap();
-
-      Pylon::CEnumParameter gainAuto(nodemap, "GainAuto");
-      if (gainAuto.IsValid() && gainAuto.CanSetValue("Off")) {
-        gainAuto.SetValue("Off");
-        GST_INFO("camera-slave: GainAuto = Off");
-      } else if (gainAuto.IsValid()) {
-        GST_WARNING("camera-slave: cannot set GainAuto=Off - auto gain may override "
-                    "the per-profile gain");
-      }
-
       gdouble gmin = 0.0, gmax = 0.0;
       gboolean is_raw = FALSE;
-      Pylon::CFloatParameter gainFloat(nodemap, "Gain");
-      Pylon::CIntegerParameter gainRaw(nodemap, "GainRaw");
-      if (gainFloat.IsValid() && gainFloat.IsWritable()) {
-        gmin = gainFloat.GetMin();
-        gmax = gainFloat.GetMax();
-      } else if (gainRaw.IsValid() && gainRaw.IsWritable()) {
-        gmin = static_cast<gdouble>(gainRaw.GetMin());
-        gmax = static_cast<gdouble>(gainRaw.GetMax());
-        is_raw = TRUE;
-      } else {
-        g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
-                    "camera-slave: hdr-sequence carries ':gain' but the camera has no "
-                    "writable Gain/GainRaw parameter");
+      if (!gst_pylon_prepare_gain(self, &gmin, &gmax, &is_raw, err)) {
         return FALSE;
       }
 

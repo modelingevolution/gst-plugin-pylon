@@ -102,6 +102,13 @@ gboolean gst_pylon_set_exposure_gain(GstPylon *self, gdouble exposure_us,
  * not writable. FALSE + err when the camera has no writable gain node. */
 gboolean gst_pylon_set_gain(GstPylon *self, gdouble gain, gdouble *applied,
                             GError **err);
+/* Take manual control of the gain: GainAuto=Off (when the node exists) and
+ * report the writable range of "Gain" (dB) or, failing that, "GainRaw"
+ * (*is_raw = TRUE). FALSE + err when the camera has no writable gain node.
+ * Safe to call while grabbing (used when gain control is switched on live). */
+gboolean gst_pylon_prepare_gain(GstPylon *self, gdouble *gain_min,
+                                gdouble *gain_max, gboolean *is_raw,
+                                GError **err);
 gchar *gst_pylon_camera_get_string_properties();
 gchar *gst_pylon_stream_grabber_get_string_properties();
 
